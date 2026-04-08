@@ -1,0 +1,600 @@
+import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
+import { toFile } from "openai/uploads";
+
+import { createAdminClient } from "@/lib/supabase/admin";
+
+type AdminClient = ReturnType<typeof createAdminClient>;
+
+type MeetingTranscriptionRow = {
+  id: string;
+  organization_id: string;
+  audio_url: string | null;
+};
+
+type GlossaryPromptTermRow = {
+  term: string;
+  reading: string | null;
+  pronunciation_variants: string[] | null;
+};
+
+type CorrectionRow = {
+  wrong_text: string;
+  correct_text: string;
+  context_keywords: string[] | null;
+};
+
+type MeetingGenerationRow = {
+  id: string;
+  organization_id: string;
+  corrected_transcript: string | null;
+  llm_used: string | null;
+};
+
+type OrganizationLlmRow = {
+  default_llm: string;
+};
+
+type GlossaryGenerationTermRow = {
+  id: string;
+  term: string;
+  definition: string | null;
+  detailed_explanation: string | null;
+  full_form: string | null;
+  aliases: string[] | null;
+};
+
+type MinutesSection = {
+  block_id: string;
+  heading: string;
+  content: string;
+};
+
+type MinutesItem = {
+  text: string;
+  owner: string | null;
+  due: string | null;
+};
+
+type OpenQuestion = {
+  text: string;
+};
+
+type DetectedTerm = {
+  term: string;
+  context: string;
+};
+
+type NewTermCandidate = {
+  term: string;
+  guess_full_form: string | null;
+  guess_definition: string | null;
+  guess_category: string | null;
+};
+
+export type GeneratedMinutesPayload = {
+  title: string;
+  summary: string;
+  sections: MinutesSection[];
+  decisions: MinutesItem[];
+  todos: MinutesItem[];
+  open_questions: OpenQuestion[];
+  detected_terms: DetectedTerm[];
+  new_term_candidates: NewTermCandidate[];
+};
+
+type GenerateMinutesOptions = {
+  adminClient?: AdminClient;
+};
+
+const MAX_WHISPER_PROMPT_LENGTH = 800;
+
+function getOpenAiClient() {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not set.");
+  }
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+}
+
+function getAnthropicClient() {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY is not set.");
+  }
+  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}
+
+function normalizeWhisperPromptTerms(terms: GlossaryPromptTermRow[]) {
+  const prompt = terms
+    .map((term) => {
+      const readings = [term.reading, ...(term.pronunciation_variants ?? []).slice(0, 3)].filter(
+        Boolean,
+      ) as string[];
+
+      if (readings.length === 0) {
+        return term.term;
+      }
+
+      return `${term.term}(${readings.join("・")})`;
+    })
+    .join("、");
+
+  if (prompt.length <= MAX_WHISPER_PROMPT_LENGTH) {
+    return prompt;
+  }
+
+  return prompt.slice(0, MAX_WHISPER_PROMPT_LENGTH);
+}
+
+function escapeRegex(input: string) {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function applyCorrections(transcript: string, corrections: CorrectionRow[]) {
+  let result = transcript;
+
+  for (const correction of corrections) {
+    if (!correction.wrong_text || !correction.correct_text) {
+      continue;
+    }
+
+    const escapedWrongText = escapeRegex(correction.wrong_text);
+
+    if (correction.context_keywords && correction.context_keywords.length > 0) {
+      const contextRegex = new RegExp(`(.{0,80})${escapedWrongText}(.{0,80})`, "g");
+
+      result = result.replace(contextRegex, (fullMatch, before, after) => {
+        const surrounding = `${before}${after}`;
+        const hasMatchedKeyword = correction.context_keywords?.some((keyword) =>
+          surrounding.includes(keyword),
+        );
+
+        if (!hasMatchedKeyword) {
+          return fullMatch;
+        }
+
+        return `${before}${correction.correct_text}${after}`;
+      });
+      continue;
+    }
+
+    result = result.replace(new RegExp(escapedWrongText, "g"), correction.correct_text);
+  }
+
+  return result;
+}
+
+function getJsonObjectText(rawText: string) {
+  const cleaned = rawText.replace(/```json|```/g, "").trim();
+
+  if (!cleaned) {
+    throw new Error("LLM response is empty.");
+  }
+
+  try {
+    JSON.parse(cleaned);
+    return cleaned;
+  } catch {
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+      throw new Error("LLM response does not contain a valid JSON object.");
+    }
+
+    const candidate = cleaned.slice(firstBrace, lastBrace + 1);
+    JSON.parse(candidate);
+    return candidate;
+  }
+}
+
+function toStringOrEmpty(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function toNullableString(value: unknown) {
+  const normalized = toStringOrEmpty(value);
+  return normalized ? normalized : null;
+}
+
+function toMinutesItem(value: unknown): MinutesItem {
+  if (!value || typeof value !== "object") {
+    return { text: "", owner: null, due: null };
+  }
+  const row = value as Record<string, unknown>;
+  return {
+    text: toStringOrEmpty(row.text),
+    owner: toNullableString(row.owner),
+    due: toNullableString(row.due),
+  };
+}
+
+function normalizeGeneratedMinutesPayload(raw: unknown): GeneratedMinutesPayload {
+  const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+
+  const rawSections = Array.isArray(data.sections) ? data.sections : [];
+  const sections: MinutesSection[] = rawSections
+    .map((section, index) => {
+      const row = section && typeof section === "object" ? (section as Record<string, unknown>) : {};
+      const heading = toStringOrEmpty(row.heading) || `議題${index + 1}`;
+      const content = toStringOrEmpty(row.content);
+      const blockId = toStringOrEmpty(row.block_id) || `section-${index + 1}`;
+      return {
+        block_id: blockId,
+        heading,
+        content,
+      };
+    })
+    .filter((section) => section.heading.length > 0 || section.content.length > 0);
+
+  const rawDecisions = Array.isArray(data.decisions) ? data.decisions : [];
+  const decisions = rawDecisions.map(toMinutesItem).filter((item) => item.text.length > 0);
+
+  const rawTodos = Array.isArray(data.todos) ? data.todos : [];
+  const todos = rawTodos.map(toMinutesItem).filter((item) => item.text.length > 0);
+
+  const rawOpenQuestions = Array.isArray(data.open_questions) ? data.open_questions : [];
+  const openQuestions = rawOpenQuestions
+    .map((question) => {
+      const row =
+        question && typeof question === "object" ? (question as Record<string, unknown>) : {};
+      return { text: toStringOrEmpty(row.text) };
+    })
+    .filter((question) => question.text.length > 0);
+
+  const rawDetectedTerms = Array.isArray(data.detected_terms) ? data.detected_terms : [];
+  const detectedTerms = rawDetectedTerms
+    .map((term) => {
+      const row = term && typeof term === "object" ? (term as Record<string, unknown>) : {};
+      return {
+        term: toStringOrEmpty(row.term),
+        context: toStringOrEmpty(row.context),
+      };
+    })
+    .filter((term) => term.term.length > 0);
+
+  const rawNewCandidates = Array.isArray(data.new_term_candidates) ? data.new_term_candidates : [];
+  const newTermCandidates = rawNewCandidates
+    .map((candidate) => {
+      const row =
+        candidate && typeof candidate === "object"
+          ? (candidate as Record<string, unknown>)
+          : {};
+      return {
+        term: toStringOrEmpty(row.term),
+        guess_full_form: toNullableString(row.guess_full_form),
+        guess_definition: toNullableString(row.guess_definition),
+        guess_category: toNullableString(row.guess_category),
+      };
+    })
+    .filter((candidate) => candidate.term.length > 0);
+
+  return {
+    title: toStringOrEmpty(data.title) || "会議議事録",
+    summary: toStringOrEmpty(data.summary),
+    sections,
+    decisions,
+    todos,
+    open_questions: openQuestions,
+    detected_terms: detectedTerms,
+    new_term_candidates: newTermCandidates,
+  };
+}
+
+function renderMinutesMarkdown(parsed: GeneratedMinutesPayload) {
+  const sectionsPart = parsed.sections
+    .map((section) => `<!-- block:${section.block_id} -->\n## ${section.heading}\n${section.content}`)
+    .join("\n\n");
+
+  const decisionsPart = parsed.decisions
+    .map((decision, index) => {
+      const owner = decision.owner ? `（担当: ${decision.owner}）` : "";
+      const due = decision.due ? `（期日: ${decision.due}）` : "";
+      return `- <!-- block:decision-${index} -->${decision.text}${owner}${due}`;
+    })
+    .join("\n");
+
+  const todosPart = parsed.todos
+    .map((todo, index) => {
+      const owner = todo.owner ? `（担当: ${todo.owner}）` : "";
+      const due = todo.due ? `（期日: ${todo.due}）` : "";
+      return `- [ ] <!-- block:todo-${index} -->${todo.text}${owner}${due}`;
+    })
+    .join("\n");
+
+  const openQuestionsPart = parsed.open_questions
+    .map((question, index) => `- <!-- block:question-${index} -->${question.text}`)
+    .join("\n");
+
+  const detectedTermsPart = parsed.detected_terms
+    .map((term) => `- **{{term:${term.term}}}**: ${term.context}`)
+    .join("\n");
+
+  const newTermsPart = parsed.new_term_candidates
+    .map((candidate) => {
+      const fullForm = candidate.guess_full_form ? `（${candidate.guess_full_form}）` : "";
+      const definition = candidate.guess_definition ?? "";
+      return `- **${candidate.term}**${fullForm}: ${definition}`;
+    })
+    .join("\n");
+
+  return `# ${parsed.title}
+
+<!-- block:summary -->
+## サマリー
+${parsed.summary}
+
+${sectionsPart}
+
+<!-- block:decisions -->
+## 決定事項
+${decisionsPart || "- なし"}
+
+<!-- block:todos -->
+## ToDo
+${todosPart || "- なし"}
+
+<!-- block:open-questions -->
+## 未解決論点
+${openQuestionsPart || "- なし"}
+
+<!-- block:detected-terms -->
+## 専門用語
+${detectedTermsPart || "- なし"}
+
+<!-- block:new-terms -->
+## 新出用語候補（辞書追加検討）
+${newTermsPart || "- なし"}
+`;
+}
+
+function buildSystemPrompt(glossaryText: string) {
+  return `あなたは医療・研究現場の議事録作成専門アシスタントです。
+以下の専門用語辞書を踏まえて、文字起こしから構造化された議事録を作成してください。
+
+【組織の専門用語辞書】
+${glossaryText}
+
+【出力要件】
+1. 文中で専門用語が登場したら必ず {{term:正式表記}} の記法でマークしてください
+2. 辞書にない専門用語が登場したら new_term_candidates に含めてください
+3. 略語の正式名称や読み方が分かる場合は、新出用語の guess_definition に記載
+4. 略語が出てきたら detected_terms に必ず含めてください
+
+【出力フォーマット（JSON）】
+{
+  "title": "会議タイトル（推定）",
+  "summary": "300字以内の全体サマリー（{{term:XXX}}記法使用可）",
+  "sections": [
+    {
+      "block_id": "section-1",
+      "heading": "議題1",
+      "content": "議論内容（Markdown、{{term:XXX}}記法使用可）"
+    }
+  ],
+  "decisions": [
+    { "text": "決定事項", "owner": "担当者 or null", "due": "期日 or null" }
+  ],
+  "todos": [
+    { "text": "ToDo", "owner": "担当者 or null", "due": "期日 or null" }
+  ],
+  "open_questions": [
+    { "text": "未解決論点" }
+  ],
+  "detected_terms": [
+    { "term": "辞書にあった用語", "context": "登場文脈" }
+  ],
+  "new_term_candidates": [
+    {
+      "term": "新出専門用語",
+      "guess_full_form": "推定正式名称",
+      "guess_definition": "推定意味",
+      "guess_category": "遺伝子/疾患名/略語/薬剤/手技/その他"
+    }
+  ]
+}
+
+【重要】
+- JSONのみを出力。前後に説明文やコードフェンスを付けない
+- 専門用語は辞書通りの表記に統一
+- block_id は "section-1", "section-2" のように連番`;
+}
+
+function getPreferredLlm(value: string | null | undefined) {
+  if (value === "gpt-4o") {
+    return "gpt-4o" as const;
+  }
+  return "claude-sonnet-4-6" as const;
+}
+
+export async function transcribeMeeting(meetingId: string) {
+  const admin = createAdminClient();
+  const openai = getOpenAiClient();
+
+  const { data: meeting } = await admin
+    .from("meetings")
+    .select("id, organization_id, audio_url")
+    .eq("id", meetingId)
+    .maybeSingle<MeetingTranscriptionRow>();
+
+  if (!meeting) {
+    throw new Error("Meeting not found.");
+  }
+
+  if (!meeting.audio_url) {
+    throw new Error("Audio file is not uploaded yet.");
+  }
+
+  await admin.from("meetings").update({ status: "transcribing" }).eq("id", meetingId);
+
+  try {
+    const { data: terms } = await admin
+      .from("glossary_terms")
+      .select("term, reading, pronunciation_variants")
+      .eq("organization_id", meeting.organization_id)
+      .order("occurrence_count", { ascending: false })
+      .limit(80);
+
+    const whisperPrompt = normalizeWhisperPromptTerms((terms ?? []) as GlossaryPromptTermRow[]);
+
+    const { data: audioBlob, error: downloadError } = await admin.storage
+      .from("audio")
+      .download(meeting.audio_url);
+
+    if (downloadError || !audioBlob) {
+      throw new Error(`Audio download failed: ${downloadError?.message ?? "unknown error"}`);
+    }
+
+    const extension = meeting.audio_url.includes(".")
+      ? meeting.audio_url.slice(meeting.audio_url.lastIndexOf("."))
+      : ".wav";
+    const uploadFile = await toFile(
+      Buffer.from(await audioBlob.arrayBuffer()),
+      `meeting-audio${extension}`,
+      { type: audioBlob.type || "audio/mpeg" },
+    );
+
+    const transcription = await openai.audio.transcriptions.create({
+      file: uploadFile,
+      model: "whisper-1",
+      language: "ja",
+      prompt: whisperPrompt,
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment"],
+    });
+
+    const rawTranscript = (transcription.text ?? "").trim();
+
+    const { data: correctionRows } = await admin
+      .from("transcription_corrections")
+      .select("wrong_text, correct_text, context_keywords")
+      .eq("organization_id", meeting.organization_id)
+      .eq("apply_globally", true);
+
+    const correctedTranscript = applyCorrections(rawTranscript, (correctionRows ?? []) as CorrectionRow[]);
+
+    await admin
+      .from("meetings")
+      .update({
+        raw_transcript: rawTranscript,
+        corrected_transcript: correctedTranscript,
+        duration_seconds: Math.round(Number(transcription.duration ?? 0)),
+        status: "generating",
+      })
+      .eq("id", meetingId);
+
+    const minutes = await generateMinutesForMeeting(meetingId, { adminClient: admin });
+
+    return {
+      meetingId,
+      rawTranscript,
+      correctedTranscript,
+      minutes,
+    };
+  } catch (error) {
+    await admin.from("meetings").update({ status: "failed" }).eq("id", meetingId);
+    throw error;
+  }
+}
+
+export async function generateMinutesForMeeting(
+  meetingId: string,
+  options?: GenerateMinutesOptions,
+) {
+  const admin = options?.adminClient ?? createAdminClient();
+
+  const { data: meeting } = await admin
+    .from("meetings")
+    .select("id, organization_id, corrected_transcript, llm_used")
+    .eq("id", meetingId)
+    .maybeSingle<MeetingGenerationRow>();
+
+  if (!meeting) {
+    throw new Error("Meeting not found.");
+  }
+
+  if (!meeting.corrected_transcript || meeting.corrected_transcript.trim().length === 0) {
+    throw new Error("No corrected transcript to generate minutes from.");
+  }
+
+  const { data: organization } = await admin
+    .from("organizations")
+    .select("default_llm")
+    .eq("id", meeting.organization_id)
+    .maybeSingle<OrganizationLlmRow>();
+
+  const { data: glossaryTerms } = await admin
+    .from("glossary_terms")
+    .select("id, term, definition, detailed_explanation, full_form, aliases")
+    .eq("organization_id", meeting.organization_id);
+
+  const glossaryText = ((glossaryTerms ?? []) as GlossaryGenerationTermRow[])
+    .map((term) => {
+      const aliasString = term.aliases?.length ? `（別名: ${term.aliases.join(", ")}）` : "";
+      const fullForm = term.full_form ? `[${term.full_form}]` : "";
+      return `- ${term.term}${fullForm}${aliasString}: ${term.definition ?? ""}`;
+    })
+    .join("\n");
+
+  const llm = getPreferredLlm(meeting.llm_used ?? organization?.default_llm);
+  const systemPrompt = buildSystemPrompt(glossaryText);
+  const userPrompt = `【文字起こし】\n${meeting.corrected_transcript}`;
+
+  let rawResultJson = "";
+
+  if (llm === "claude-sonnet-4-6") {
+    const anthropic = getAnthropicClient();
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8000,
+      system: systemPrompt,
+      messages: [
+        {
+          role: "user",
+          content: userPrompt,
+        },
+      ],
+    });
+
+    const textBlock = response.content.find((content) => content.type === "text");
+    rawResultJson = textBlock?.type === "text" ? textBlock.text : "";
+  } else {
+    const openai = getOpenAiClient();
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+
+    rawResultJson = completion.choices[0]?.message?.content ?? "";
+  }
+
+  const jsonText = getJsonObjectText(rawResultJson);
+  const parsed = normalizeGeneratedMinutesPayload(JSON.parse(jsonText));
+  const minutesMarkdown = renderMinutesMarkdown(parsed);
+
+  await admin
+    .from("meetings")
+    .update({
+      minutes_markdown: minutesMarkdown,
+      decisions: parsed.decisions,
+      todos: parsed.todos,
+      open_questions: parsed.open_questions,
+      detected_terms: parsed.detected_terms,
+      new_term_candidates: parsed.new_term_candidates,
+      llm_used: llm,
+      status: "completed",
+    })
+    .eq("id", meetingId);
+
+  const uniqueDetectedTerms = Array.from(new Set(parsed.detected_terms.map((term) => term.term)));
+  for (const term of uniqueDetectedTerms) {
+    await admin.rpc("increment_term_occurrence", {
+      p_organization_id: meeting.organization_id,
+      p_term: term,
+    });
+  }
+
+  return parsed;
+}

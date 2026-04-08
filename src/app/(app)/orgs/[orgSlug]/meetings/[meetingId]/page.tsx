@@ -1,19 +1,397 @@
+import Link from "next/link";
+import { notFound, redirect } from "next/navigation";
+
+import { MinutesRenderer } from "@/components/MinutesRenderer";
 import { PageShell } from "@/components/app/page-shell";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { generateMinutesForMeeting, transcribeMeeting } from "@/lib/meeting-pipeline";
+import { requireOrganizationContext } from "@/lib/org-context";
+import { cn } from "@/lib/utils";
 
 type Params = { orgSlug: string; meetingId: string };
+type SearchParams = Record<string, string | string[] | undefined>;
+
+type MeetingDetailRow = {
+  id: string;
+  organization_id: string;
+  title: string;
+  status: "pending" | "transcribing" | "generating" | "completed" | "failed";
+  meeting_date: string | null;
+  audio_url: string | null;
+  llm_used: string | null;
+  raw_transcript: string | null;
+  corrected_transcript: string | null;
+  minutes_markdown: string | null;
+  new_term_candidates: unknown;
+  created_at: string;
+  updated_at: string;
+};
+
+type GlossaryLookupRow = {
+  id: string;
+  term: string;
+  definition: string | null;
+  detailed_explanation: string | null;
+  full_form: string | null;
+  pronunciation_variants: string[] | null;
+};
+
+type NewTermCandidate = {
+  term: string;
+  guess_full_form: string | null;
+  guess_definition: string | null;
+  guess_category: string | null;
+};
+
+type ExistingTermRow = {
+  id: string;
+  definition: string | null;
+  detailed_explanation: string | null;
+  full_form: string | null;
+  category: string | null;
+};
+
+function redirectWithMessage(
+  orgSlug: string,
+  meetingId: string,
+  key: string,
+  message: string,
+): never {
+  return redirect(
+    `/orgs/${orgSlug}/meetings/${meetingId}?${key}=${encodeURIComponent(message)}`,
+  );
+}
+
+function normalizeText(value: FormDataEntryValue | null) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseNewTermCandidates(raw: unknown): NewTermCandidate[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw
+    .map((candidate) => {
+      const row =
+        candidate && typeof candidate === "object"
+          ? (candidate as Record<string, unknown>)
+          : {};
+      const term = typeof row.term === "string" ? row.term.trim() : "";
+      if (!term) {
+        return null;
+      }
+      return {
+        term,
+        guess_full_form:
+          typeof row.guess_full_form === "string" && row.guess_full_form.trim()
+            ? row.guess_full_form.trim()
+            : null,
+        guess_definition:
+          typeof row.guess_definition === "string" && row.guess_definition.trim()
+            ? row.guess_definition.trim()
+            : null,
+        guess_category:
+          typeof row.guess_category === "string" && row.guess_category.trim()
+            ? row.guess_category.trim()
+            : null,
+      };
+    })
+    .filter((candidate): candidate is NewTermCandidate => Boolean(candidate));
+}
+
+function statusLabel(status: MeetingDetailRow["status"]) {
+  switch (status) {
+    case "pending":
+      return "未処理";
+    case "transcribing":
+      return "文字起こし中";
+    case "generating":
+      return "議事録生成中";
+    case "completed":
+      return "完了";
+    case "failed":
+      return "失敗";
+    default:
+      return status;
+  }
+}
+
+async function loadMeetingForOrg(orgSlug: string, meetingId: string) {
+  const nextPath = `/orgs/${orgSlug}/meetings/${meetingId}`;
+  const { supabase, organization, user } = await requireOrganizationContext({
+    orgSlug,
+    nextPath,
+  });
+
+  const { data: meeting } = await supabase
+    .from("meetings")
+    .select(
+      "id, organization_id, title, status, meeting_date, audio_url, llm_used, raw_transcript, corrected_transcript, minutes_markdown, new_term_candidates, created_at, updated_at",
+    )
+    .eq("organization_id", organization.id)
+    .eq("id", meetingId)
+    .maybeSingle<MeetingDetailRow>();
+
+  if (!meeting) {
+    notFound();
+  }
+
+  return { supabase, organization, user, meeting };
+}
+
+async function startTranscriptionAction(orgSlug: string, meetingId: string) {
+  "use server";
+
+  const { meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+
+  if (!meeting.audio_url) {
+    redirectWithMessage(orgSlug, meetingId, "error", "音声ファイルが未登録です。");
+  }
+
+  try {
+    await transcribeMeeting(meetingId);
+    redirectWithMessage(
+      orgSlug,
+      meetingId,
+      "success",
+      "文字起こしと議事録生成が完了しました。",
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    redirectWithMessage(orgSlug, meetingId, "error", `処理に失敗しました: ${message}`);
+  }
+}
+
+async function regenerateMinutesAction(orgSlug: string, meetingId: string) {
+  "use server";
+
+  const { supabase, meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+
+  if (!meeting.corrected_transcript) {
+    redirectWithMessage(
+      orgSlug,
+      meetingId,
+      "error",
+      "文字起こしデータがないため再生成できません。",
+    );
+  }
+
+  await supabase.from("meetings").update({ status: "generating" }).eq("id", meetingId);
+
+  try {
+    await generateMinutesForMeeting(meetingId);
+    redirectWithMessage(orgSlug, meetingId, "success", "議事録を再生成しました。");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    redirectWithMessage(orgSlug, meetingId, "error", `議事録再生成に失敗しました: ${message}`);
+  }
+}
+
+async function addCandidateToGlossaryAction(orgSlug: string, meetingId: string, formData: FormData) {
+  "use server";
+
+  const { supabase, organization, user, meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+
+  const term = normalizeText(formData.get("term"));
+  const guessFullForm = normalizeText(formData.get("guessFullForm"));
+  const guessDefinition = normalizeText(formData.get("guessDefinition"));
+  const guessCategory = normalizeText(formData.get("guessCategory"));
+
+  if (!term) {
+    redirectWithMessage(orgSlug, meetingId, "error", "候補用語が不正です。");
+  }
+
+  const { data: existingTerm } = await supabase
+    .from("glossary_terms")
+    .select("id, definition, detailed_explanation, full_form, category")
+    .eq("organization_id", organization.id)
+    .eq("term", term)
+    .maybeSingle<ExistingTermRow>();
+
+  if (existingTerm) {
+    const updates: Record<string, string> = {};
+
+    if (guessDefinition && !existingTerm.definition) {
+      updates.definition = guessDefinition;
+    }
+    if (guessFullForm && !existingTerm.full_form) {
+      updates.full_form = guessFullForm;
+    }
+    if (guessCategory && !existingTerm.category) {
+      updates.category = guessCategory;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await supabase.from("glossary_terms").update(updates).eq("id", existingTerm.id);
+    }
+  } else {
+    const { error: insertError } = await supabase.from("glossary_terms").insert({
+      organization_id: organization.id,
+      term,
+      full_form: guessFullForm || null,
+      definition: guessDefinition || null,
+      category: guessCategory || null,
+      created_by: user.id,
+    });
+
+    if (insertError) {
+      redirectWithMessage(orgSlug, meetingId, "error", `辞書追加に失敗しました: ${insertError.message}`);
+    }
+  }
+
+  const candidates = parseNewTermCandidates(meeting.new_term_candidates);
+  const remainingCandidates = candidates.filter((candidate) => candidate.term !== term);
+  await supabase
+    .from("meetings")
+    .update({ new_term_candidates: remainingCandidates })
+    .eq("id", meetingId);
+
+  redirectWithMessage(orgSlug, meetingId, "success", `「${term}」を辞書に追加しました。`);
+}
 
 export default async function MeetingDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<Params>;
+  searchParams: Promise<SearchParams>;
 }) {
   const { orgSlug, meetingId } = await Promise.resolve(params);
+  const parsedSearchParams = await Promise.resolve(searchParams);
+
+  const { supabase, meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+
+  const { data: glossaryTerms } = await supabase
+    .from("glossary_terms")
+    .select("id, term, definition, detailed_explanation, full_form, pronunciation_variants")
+    .eq("organization_id", meeting.organization_id)
+    .order("occurrence_count", { ascending: false })
+    .limit(300);
+
+  const terms = (glossaryTerms ?? []) as GlossaryLookupRow[];
+  const newTermCandidates = parseNewTermCandidates(meeting.new_term_candidates);
+
+  const message = typeof parsedSearchParams.message === "string" ? parsedSearchParams.message : "";
+  const success = typeof parsedSearchParams.success === "string" ? parsedSearchParams.success : "";
+  const error = typeof parsedSearchParams.error === "string" ? parsedSearchParams.error : "";
 
   return (
     <PageShell
-      title="議事録詳細"
-      description={`meetingId: ${meetingId} / Phase 4 で MinutesRenderer + CommentSidebar を実装します。`}
+      title={meeting.title}
+      description={`会議ID: ${meeting.id}`}
       orgSlug={orgSlug}
-    />
+    >
+      <div className="flex flex-wrap gap-2">
+        <Link href={`/orgs/${orgSlug}`} className={cn(buttonVariants({ variant: "outline" }))}>
+          ダッシュボードへ戻る
+        </Link>
+        <Link
+          href={`/orgs/${orgSlug}/meetings/${meetingId}/transcript`}
+          className={cn(buttonVariants({ variant: "outline" }))}
+        >
+          文字起こし全文
+        </Link>
+      </div>
+
+      {message ? (
+        <p className="rounded-md border border-emerald-300/50 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+          {message}
+        </p>
+      ) : null}
+      {success ? (
+        <p className="rounded-md border border-emerald-300/50 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+          {success}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
+
+      <section className="space-y-3 rounded-lg border p-4 text-sm">
+        <h2 className="font-semibold">処理状態</h2>
+        <p>
+          ステータス: <span className="font-medium">{statusLabel(meeting.status)}</span>
+        </p>
+        <p>LLM: {meeting.llm_used ?? "未指定"}</p>
+        <p>開催日時: {meeting.meeting_date ? new Date(meeting.meeting_date).toLocaleString("ja-JP") : "-"}</p>
+        <p>作成日時: {new Date(meeting.created_at).toLocaleString("ja-JP")}</p>
+        <p>更新日時: {new Date(meeting.updated_at).toLocaleString("ja-JP")}</p>
+
+        <div className="flex flex-wrap gap-2 pt-2">
+          {meeting.audio_url ? (
+            <form action={startTranscriptionAction.bind(null, orgSlug, meetingId)}>
+              <Button type="submit" disabled={meeting.status === "transcribing" || meeting.status === "generating"}>
+                文字起こしを開始
+              </Button>
+            </form>
+          ) : null}
+
+          {meeting.corrected_transcript ? (
+            <form action={regenerateMinutesAction.bind(null, orgSlug, meetingId)}>
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={meeting.status === "transcribing" || meeting.status === "generating"}
+              >
+                議事録を再生成
+              </Button>
+            </form>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold">議事録本文</h2>
+        {meeting.minutes_markdown ? (
+          <MinutesRenderer markdown={meeting.minutes_markdown} glossaryTerms={terms} orgSlug={orgSlug} />
+        ) : (
+          <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
+            まだ議事録は生成されていません。
+          </p>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold">新出用語候補</h2>
+        {newTermCandidates.length === 0 ? (
+          <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
+            新出用語候補はありません。
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {newTermCandidates.map((candidate) => (
+              <form
+                key={candidate.term}
+                action={addCandidateToGlossaryAction.bind(null, orgSlug, meetingId)}
+                className="rounded-lg border p-3 text-sm"
+              >
+                <input type="hidden" name="term" value={candidate.term} />
+                <input type="hidden" name="guessFullForm" value={candidate.guess_full_form ?? ""} />
+                <input type="hidden" name="guessDefinition" value={candidate.guess_definition ?? ""} />
+                <input type="hidden" name="guessCategory" value={candidate.guess_category ?? ""} />
+
+                <p className="font-medium">{candidate.term}</p>
+                {candidate.guess_full_form ? (
+                  <p className="text-xs text-muted-foreground">{candidate.guess_full_form}</p>
+                ) : null}
+                {candidate.guess_definition ? <p className="mt-1">{candidate.guess_definition}</p> : null}
+                {candidate.guess_category ? (
+                  <p className="mt-1 text-xs text-muted-foreground">カテゴリ推定: {candidate.guess_category}</p>
+                ) : null}
+
+                <div className="mt-3">
+                  <Button type="submit" variant="outline">
+                    辞書に追加
+                  </Button>
+                </div>
+              </form>
+            ))}
+          </div>
+        )}
+      </section>
+    </PageShell>
   );
 }
