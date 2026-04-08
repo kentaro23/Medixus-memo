@@ -470,7 +470,8 @@ values ('audio', 'audio', false)
 on conflict (id) do update
 set public = excluded.public;
 
-alter table storage.objects enable row level security;
+-- storage.objects is managed by Supabase and already has RLS enabled.
+-- Avoid ALTER here because migration role may not own the table.
 
 create policy "Members can read audio objects"
   on storage.objects for select
