@@ -13,14 +13,12 @@ export default async function SignUpPage({
 }) {
   const params = await Promise.resolve(searchParams);
   const error = typeof params.error === "string" ? params.error : "";
-  const sent = params.sent === "1";
-  const email = typeof params.email === "string" ? params.email : "";
 
   return (
     <section className="rounded-xl border bg-background p-6 shadow-sm">
-      <h1 className="text-xl font-semibold">新規登録</h1>
+      <h1 className="text-xl font-semibold">代表者登録</h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        Magic Link でサインアップします。パスワードは不要です。
+        研究室・医局の代表者アカウントを作成します。メンバーのアカウント発行は登録後に設定画面から行えます。
       </p>
 
       {error ? (
@@ -29,14 +27,7 @@ export default async function SignUpPage({
         </p>
       ) : null}
 
-      {sent ? (
-        <p className="mt-4 rounded-md border border-emerald-300/50 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-          {email || "指定のメールアドレス"} 宛に登録リンクを送信しました。
-        </p>
-      ) : null}
-
       <form action={signUpAction} className="mt-6 space-y-4">
-        <input type="hidden" name="next" value="/orgs/new" />
         <div className="space-y-2">
           <label htmlFor="fullName" className="text-sm font-medium">
             氏名（任意）
@@ -49,6 +40,7 @@ export default async function SignUpPage({
             placeholder="北里 健太郎"
           />
         </div>
+
         <div className="space-y-2">
           <label htmlFor="email" className="text-sm font-medium">
             メールアドレス
@@ -62,8 +54,39 @@ export default async function SignUpPage({
             placeholder="you@example.com"
           />
         </div>
+
+        <div className="space-y-2">
+          <label htmlFor="password" className="text-sm font-medium">
+            パスワード（8文字以上）
+          </label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            minLength={8}
+            required
+            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+            placeholder="********"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <label htmlFor="passwordConfirm" className="text-sm font-medium">
+            パスワード（確認）
+          </label>
+          <input
+            id="passwordConfirm"
+            name="passwordConfirm"
+            type="password"
+            minLength={8}
+            required
+            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+            placeholder="********"
+          />
+        </div>
+
         <Button type="submit" className="w-full">
-          登録リンクを送信
+          代表者アカウントを作成
         </Button>
       </form>
 

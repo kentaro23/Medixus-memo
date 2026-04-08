@@ -4,10 +4,6 @@ import { redirect } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
 
-function getBaseUrl() {
-  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-}
-
 function getSafeNextPath(formData: FormData) {
   const value = formData.get("next");
   if (typeof value !== "string" || !value.startsWith("/")) {
@@ -16,66 +12,101 @@ function getSafeNextPath(formData: FormData) {
   return value;
 }
 
-function redirectWithMessage(path: string, key: string, message: string) {
-  redirect(`${path}?${key}=${encodeURIComponent(message)}`);
+function redirectWithMessage(path: string, key: string, message: string): never {
+  return redirect(`${path}?${key}=${encodeURIComponent(message)}`);
 }
 
-function toEmailRedirectUrl(nextPath: string) {
-  const url = new URL("/auth/callback", getBaseUrl());
-  url.searchParams.set("next", nextPath);
-  return url.toString();
+function normalizeEmail(value: FormDataEntryValue | null) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function normalizeOptionalText(value: FormDataEntryValue | null) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim();
+}
+
+function toFriendlyAuthError(message: string) {
+  if (message.includes("Invalid login credentials")) {
+    return "メールアドレスまたはパスワードが正しくありません。";
+  }
+  if (message.includes("Email not confirmed")) {
+    return "メール確認が完了していません。受信メールを確認してください。";
+  }
+  if (message.includes("already registered")) {
+    return "このメールアドレスは既に登録されています。ログインしてください。";
+  }
+  if (message.includes("Password should be at least")) {
+    return "パスワードは8文字以上にしてください。";
+  }
+  return message;
 }
 
 export async function signInAction(formData: FormData) {
-  const emailValue = formData.get("email");
+  const email = normalizeEmail(formData.get("email"));
+  const password = normalizeOptionalText(formData.get("password"));
   const nextPath = getSafeNextPath(formData);
 
-  if (typeof emailValue !== "string" || emailValue.length === 0) {
+  if (!email) {
     redirectWithMessage("/login", "error", "メールアドレスを入力してください。");
-    return;
   }
-  const email = emailValue;
+
+  if (!password) {
+    redirectWithMessage("/login", "error", "パスワードを入力してください。");
+  }
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithOtp({
+  const { error } = await supabase.auth.signInWithPassword({
     email,
-    options: {
-      shouldCreateUser: false,
-      emailRedirectTo: toEmailRedirectUrl(nextPath),
-    },
+    password,
   });
 
   if (error) {
-    redirectWithMessage("/login", "error", error.message);
+    redirectWithMessage("/login", "error", toFriendlyAuthError(error.message));
   }
 
-  redirect(`/login?sent=1&email=${encodeURIComponent(email)}`);
+  redirect(nextPath);
 }
 
 export async function signUpAction(formData: FormData) {
-  const emailValue = formData.get("email");
-  const fullName = formData.get("fullName");
-  const nextPath = getSafeNextPath(formData);
+  const fullName = normalizeOptionalText(formData.get("fullName"));
+  const email = normalizeEmail(formData.get("email"));
+  const password = normalizeOptionalText(formData.get("password"));
+  const passwordConfirm = normalizeOptionalText(formData.get("passwordConfirm"));
 
-  if (typeof emailValue !== "string" || emailValue.length === 0) {
+  if (!email) {
     redirectWithMessage("/signup", "error", "メールアドレスを入力してください。");
-    return;
   }
-  const email = emailValue;
+
+  if (password.length < 8) {
+    redirectWithMessage("/signup", "error", "パスワードは8文字以上にしてください。");
+  }
+
+  if (password !== passwordConfirm) {
+    redirectWithMessage("/signup", "error", "確認用パスワードが一致しません。");
+  }
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithOtp({
+  const { data, error } = await supabase.auth.signUp({
     email,
+    password,
     options: {
-      shouldCreateUser: true,
-      emailRedirectTo: toEmailRedirectUrl(nextPath),
-      data: typeof fullName === "string" && fullName.length > 0 ? { full_name: fullName } : undefined,
+      data: fullName ? { full_name: fullName } : undefined,
     },
   });
 
   if (error) {
-    redirectWithMessage("/signup", "error", error.message);
+    redirectWithMessage("/signup", "error", toFriendlyAuthError(error.message));
   }
 
-  redirect(`/signup?sent=1&email=${encodeURIComponent(email)}`);
+  if (!data.session) {
+    redirectWithMessage(
+      "/login",
+      "message",
+      "アカウントを作成しました。メール確認後にログインしてください。",
+    );
+  }
+
+  redirect("/orgs/new");
 }
