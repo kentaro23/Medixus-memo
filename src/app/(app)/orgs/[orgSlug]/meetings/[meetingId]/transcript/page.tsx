@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { TranscriptCorrectionPanel } from "@/components/corrections/TranscriptCorrectionPanel";
 import { PageShell } from "@/components/app/page-shell";
 import { buttonVariants } from "@/components/ui/button";
 import { requireOrganizationContext } from "@/lib/org-context";
@@ -72,6 +73,12 @@ export default async function MeetingTranscriptPage({
           className="min-h-64 w-full rounded-md border bg-background px-3 py-2 text-sm"
         />
       </section>
+
+      <TranscriptCorrectionPanel
+        organizationId={organization.id}
+        meetingId={meetingId}
+        correctedTranscript={meeting.corrected_transcript ?? ""}
+      />
     </PageShell>
   );
 }

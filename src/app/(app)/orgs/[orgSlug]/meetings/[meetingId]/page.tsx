@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { MinutesRenderer } from "@/components/MinutesRenderer";
 import { PageShell } from "@/components/app/page-shell";
+import { CommentSidebar } from "@/components/comments/CommentSidebar";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { generateMinutesForMeeting, transcribeMeeting } from "@/lib/meeting-pipeline";
 import { requireOrganizationContext } from "@/lib/org-context";
@@ -98,6 +99,22 @@ function parseNewTermCandidates(raw: unknown): NewTermCandidate[] {
       };
     })
     .filter((candidate): candidate is NewTermCandidate => Boolean(candidate));
+}
+
+function extractBlockIds(markdown: string | null) {
+  if (!markdown) {
+    return [] as string[];
+  }
+
+  const regex = /<!--\s*block:([a-zA-Z0-9_-]+)\s*-->/g;
+  const ids: string[] = [];
+  let match = regex.exec(markdown);
+  while (match) {
+    ids.push(match[1]);
+    match = regex.exec(markdown);
+  }
+
+  return Array.from(new Set(ids));
 }
 
 function statusLabel(status: MeetingDetailRow["status"]) {
@@ -271,6 +288,7 @@ export default async function MeetingDetailPage({
 
   const terms = (glossaryTerms ?? []) as GlossaryLookupRow[];
   const newTermCandidates = parseNewTermCandidates(meeting.new_term_candidates);
+  const blockIds = extractBlockIds(meeting.minutes_markdown);
 
   const message = typeof parsedSearchParams.message === "string" ? parsedSearchParams.message : "";
   const success = typeof parsedSearchParams.success === "string" ? parsedSearchParams.success : "";
@@ -343,15 +361,23 @@ export default async function MeetingDetailPage({
         </div>
       </section>
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold">議事録本文</h2>
-        {meeting.minutes_markdown ? (
-          <MinutesRenderer markdown={meeting.minutes_markdown} glossaryTerms={terms} orgSlug={orgSlug} />
-        ) : (
-          <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
-            まだ議事録は生成されていません。
-          </p>
-        )}
+      <section className="grid gap-4 lg:grid-cols-[1fr_360px]">
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold">議事録本文</h2>
+          {meeting.minutes_markdown ? (
+            <MinutesRenderer markdown={meeting.minutes_markdown} glossaryTerms={terms} orgSlug={orgSlug} />
+          ) : (
+            <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
+              まだ議事録は生成されていません。
+            </p>
+          )}
+        </div>
+
+        <CommentSidebar
+          organizationId={meeting.organization_id}
+          meetingId={meeting.id}
+          blockIds={blockIds}
+        />
       </section>
 
       <section className="space-y-3">
