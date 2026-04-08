@@ -4,12 +4,30 @@ import { redirect } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
 
+function getBaseUrl() {
+  if (process.env.NEXT_PUBLIC_APP_URL) {
+    return process.env.NEXT_PUBLIC_APP_URL;
+  }
+
+  if (process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}`;
+  }
+
+  return "http://localhost:3000";
+}
+
 function getSafeNextPath(formData: FormData) {
   const value = formData.get("next");
   if (typeof value !== "string" || !value.startsWith("/")) {
     return "/";
   }
   return value;
+}
+
+function toEmailRedirectUrl(nextPath: string) {
+  const url = new URL("/auth/callback", getBaseUrl());
+  url.searchParams.set("next", nextPath);
+  return url.toString();
 }
 
 function redirectWithMessage(path: string, key: string, message: string): never {
@@ -74,6 +92,7 @@ export async function signUpAction(formData: FormData) {
   const email = normalizeEmail(formData.get("email"));
   const password = normalizeOptionalText(formData.get("password"));
   const passwordConfirm = normalizeOptionalText(formData.get("passwordConfirm"));
+  const nextPath = getSafeNextPath(formData);
 
   if (!email) {
     redirectWithMessage("/signup", "error", "メールアドレスを入力してください。");
@@ -92,6 +111,7 @@ export async function signUpAction(formData: FormData) {
     email,
     password,
     options: {
+      emailRedirectTo: toEmailRedirectUrl(nextPath),
       data: fullName ? { full_name: fullName } : undefined,
     },
   });
@@ -104,7 +124,7 @@ export async function signUpAction(formData: FormData) {
     redirectWithMessage(
       "/login",
       "message",
-      "アカウントを作成しました。メール確認後にログインしてください。",
+      "アカウントを作成しました。確認メールのリンクを開いた後にログインしてください。",
     );
   }
 

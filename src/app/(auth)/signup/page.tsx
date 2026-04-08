@@ -28,6 +28,7 @@ export default async function SignUpPage({
       ) : null}
 
       <form action={signUpAction} className="mt-6 space-y-4">
+        <input type="hidden" name="next" value="/orgs/new" />
         <div className="space-y-2">
           <label htmlFor="fullName" className="text-sm font-medium">
             氏名（任意）
