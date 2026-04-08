@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { randomUUID } from "crypto";
 
 import { Button } from "@/components/ui/button";
 import { PageShell } from "@/components/app/page-shell";
@@ -15,6 +16,14 @@ function toSlug(input: string) {
     .replace(/^-|-$/g, "");
 }
 
+function getFallbackSlug() {
+  return `org-${randomUUID().slice(0, 8)}`;
+}
+
+function redirectWithError(message: string): never {
+  return redirect(`/orgs/new?error=${encodeURIComponent(message)}`);
+}
+
 async function createOrganization(formData: FormData) {
   "use server";
 
@@ -29,22 +38,18 @@ async function createOrganization(formData: FormData) {
 
   const nameValue = formData.get("name");
   if (typeof nameValue !== "string" || nameValue.trim().length === 0) {
-    redirect("/orgs/new?error=組織名を入力してください");
+    redirectWithError("組織名を入力してください");
   }
 
   const generatedSlug = toSlug(nameValue);
-  if (!generatedSlug) {
-    redirect("/orgs/new?error=英数字を含む組織名を指定してください");
-  }
-
   const slugValue = formData.get("slug");
   const slug =
     typeof slugValue === "string" && slugValue.trim().length > 0
       ? toSlug(slugValue)
-      : generatedSlug;
+      : generatedSlug || getFallbackSlug();
 
   if (!slug) {
-    redirect("/orgs/new?error=有効なslugを入力してください");
+    redirectWithError("有効なslugを入力してください");
   }
 
   const { data: organization, error: orgError } = await supabase
@@ -57,7 +62,10 @@ async function createOrganization(formData: FormData) {
     .single();
 
   if (orgError || !organization) {
-    redirect(`/orgs/new?error=${encodeURIComponent(orgError?.message ?? "組織作成に失敗しました")}`);
+    if (orgError?.code === "23505") {
+      redirectWithError("同じslugが既に存在します。slugを指定して再試行してください。");
+    }
+    redirectWithError(orgError?.message ?? "組織作成に失敗しました");
   }
 
   const { error: memberError } = await supabase.from("organization_members").insert({
@@ -67,7 +75,7 @@ async function createOrganization(formData: FormData) {
   });
 
   if (memberError) {
-    redirect(`/orgs/new?error=${encodeURIComponent(memberError.message)}`);
+    redirectWithError(memberError.message);
   }
 
   redirect(`/orgs/${organization.slug}`);
