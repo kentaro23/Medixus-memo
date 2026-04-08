@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 
 import { Button } from "@/components/ui/button";
 import { PageShell } from "@/components/app/page-shell";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 function toSlug(input: string) {
@@ -28,6 +29,7 @@ async function createOrganization(formData: FormData) {
   "use server";
 
   const supabase = await createClient();
+  const admin = createAdminClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -52,7 +54,21 @@ async function createOrganization(formData: FormData) {
     redirectWithError("有効なslugを入力してください");
   }
 
-  const { data: organization, error: orgError } = await supabase
+  const { error: profileError } = await admin.from("profiles").upsert(
+    {
+      id: user.id,
+      email: user.email ?? "",
+      full_name:
+        typeof user.user_metadata?.full_name === "string" ? user.user_metadata.full_name : null,
+    },
+    { onConflict: "id" },
+  );
+
+  if (profileError) {
+    redirectWithError(`プロフィール同期に失敗しました: ${profileError.message}`);
+  }
+
+  const { data: organization, error: orgError } = await admin
     .from("organizations")
     .insert({
       name: nameValue.trim(),
@@ -68,13 +84,14 @@ async function createOrganization(formData: FormData) {
     redirectWithError(orgError?.message ?? "組織作成に失敗しました");
   }
 
-  const { error: memberError } = await supabase.from("organization_members").insert({
+  const { error: memberError } = await admin.from("organization_members").insert({
     organization_id: organization.id,
     user_id: user.id,
     role: "owner",
   });
 
   if (memberError) {
+    await admin.from("organizations").delete().eq("id", organization.id);
     redirectWithError(memberError.message);
   }
 
