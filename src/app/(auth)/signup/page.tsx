@@ -13,6 +13,8 @@ export default async function SignUpPage({
 }) {
   const params = await Promise.resolve(searchParams);
   const error = typeof params.error === "string" ? params.error : "";
+  const nextPath =
+    typeof params.next === "string" && params.next.startsWith("/") ? params.next : "/orgs/new";
 
   return (
     <section className="rounded-xl border bg-background p-6 shadow-sm">
@@ -28,7 +30,7 @@ export default async function SignUpPage({
       ) : null}
 
       <form action={signUpAction} className="mt-6 space-y-4">
-        <input type="hidden" name="next" value="/orgs/new" />
+        <input type="hidden" name="next" value={nextPath} />
         <div className="space-y-2">
           <label htmlFor="fullName" className="text-sm font-medium">
             氏名（任意）
@@ -92,7 +94,10 @@ export default async function SignUpPage({
       </form>
 
       <p className="mt-4 text-sm text-muted-foreground">
-        すでに登録済みの場合は <Link href="/login" className="underline">ログイン</Link>
+        すでに登録済みの場合は{" "}
+        <Link href={`/login?next=${encodeURIComponent(nextPath)}`} className="underline">
+          ログイン
+        </Link>
       </p>
     </section>
   );

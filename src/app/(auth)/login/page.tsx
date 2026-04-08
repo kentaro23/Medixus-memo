@@ -69,7 +69,10 @@ export default async function LoginPage({
       </form>
 
       <p className="mt-4 text-sm text-muted-foreground">
-        研究室代表者として初めて利用する場合は <Link href="/signup" className="underline">代表者登録</Link>
+        研究室代表者として初めて利用する場合は{" "}
+        <Link href={`/signup?next=${encodeURIComponent(nextPath)}`} className="underline">
+          代表者登録
+        </Link>
       </p>
     </section>
   );
