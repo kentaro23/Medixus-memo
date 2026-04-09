@@ -3,9 +3,6 @@ import { LiveTranscriptionPanel } from "@/components/meeting/LiveTranscriptionPa
 import { requireOrganizationContext } from "@/lib/org-context";
 
 type Params = { orgSlug: string };
-type OrganizationLlmRow = {
-  default_llm: string;
-};
 
 export default async function LiveMeetingPage({
   params,
@@ -15,19 +12,12 @@ export default async function LiveMeetingPage({
   const { orgSlug } = await Promise.resolve(params);
   const nextPath = `/orgs/${orgSlug}/meetings/live`;
 
-  const { supabase, organization } = await requireOrganizationContext({
+  const { organization } = await requireOrganizationContext({
     orgSlug,
     nextPath,
   });
 
-  const { data: orgSettings } = await supabase
-    .from("organizations")
-    .select("default_llm")
-    .eq("id", organization.id)
-    .maybeSingle<OrganizationLlmRow>();
-
-  const defaultLlm =
-    orgSettings?.default_llm === "gpt-4o" ? "gpt-4o" : "claude-sonnet-4-6";
+  const defaultLlm = "gpt-5.4";
 
   return (
     <PageShell

@@ -52,14 +52,14 @@ export function NewMeetingForm({
 }: {
   orgSlug: string;
   organizationId: string;
-  defaultLlm: "claude-sonnet-4-6" | "gpt-4o";
+  defaultLlm: "claude-sonnet-4-6" | "gpt-5.4";
 }) {
   const router = useRouter();
   const supabase = createClient();
 
   const [title, setTitle] = useState("");
   const [meetingDate, setMeetingDate] = useState("");
-  const [llmUsed, setLlmUsed] = useState<"claude-sonnet-4-6" | "gpt-4o">(defaultLlm);
+  const [llmUsed, setLlmUsed] = useState<"claude-sonnet-4-6" | "gpt-5.4">(defaultLlm);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -203,12 +203,12 @@ export function NewMeetingForm({
             id="llmUsed"
             value={llmUsed}
             onChange={(event) =>
-              setLlmUsed(event.target.value === "gpt-4o" ? "gpt-4o" : "claude-sonnet-4-6")
+              setLlmUsed(event.target.value === "gpt-5.4" ? "gpt-5.4" : "claude-sonnet-4-6")
             }
             className="w-full rounded-md border bg-background px-3 py-2 text-sm"
           >
             <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-            <option value="gpt-4o">gpt-4o</option>
+            <option value="gpt-5.4">gpt-5.4</option>
           </select>
         </div>
       </div>

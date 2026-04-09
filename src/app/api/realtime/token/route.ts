@@ -34,7 +34,13 @@ function normalizeText(value: unknown) {
 }
 
 function normalizeLlm(value: string) {
-  return value === "gpt-4o" ? "gpt-4o" : "claude-sonnet-4-6";
+  if (value === "claude-sonnet-4-6") {
+    return "claude-sonnet-4-6";
+  }
+  if (value === "gpt-5.4" || value === "gpt-4o") {
+    return "gpt-5.4";
+  }
+  return "gpt-5.4";
 }
 
 function toDefaultMeetingTitle() {

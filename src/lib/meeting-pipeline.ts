@@ -114,6 +114,9 @@ const MAX_WHISPER_PROMPT_LENGTH = 800;
 const WHISPER_SAFE_FILE_BYTES = 24 * 1024 * 1024;
 const WHISPER_SEGMENT_SECONDS = 20 * 60;
 const WHISPER_SEGMENT_MIME_TYPE = "audio/mp4";
+const OPENAI_MINUTES_MODEL = process.env.OPENAI_MINUTES_MODEL?.trim() || "gpt-5.4";
+
+type MinutesLlm = "claude-sonnet-4-6" | "gpt-5.4";
 
 type WhisperTranscription = Awaited<ReturnType<OpenAI["audio"]["transcriptions"]["create"]>>;
 type SegmentedAudioFile = {
@@ -770,25 +773,28 @@ ${detailInstruction}
 }
 
 function getPreferredLlm(value: string | null | undefined) {
-  if (value === "gpt-4o") {
-    return "gpt-4o" as const;
+  if (value === "claude-sonnet-4-6") {
+    return "claude-sonnet-4-6" as const;
   }
-  return "claude-sonnet-4-6" as const;
+  if (value === "gpt-5.4" || value === "gpt-4o") {
+    return "gpt-5.4" as const;
+  }
+  return "gpt-5.4" as const;
 }
 
-function resolveAvailableLlm(preferred: "claude-sonnet-4-6" | "gpt-4o") {
+function resolveAvailableLlm(preferred: MinutesLlm) {
   if (preferred === "claude-sonnet-4-6") {
     if (hasAnthropicKey()) {
       return "claude-sonnet-4-6" as const;
     }
     if (hasOpenAiKey()) {
-      return "gpt-4o" as const;
+      return "gpt-5.4" as const;
     }
     throw new Error("ANTHROPIC_API_KEY と OPENAI_API_KEY の両方が未設定です。");
   }
 
   if (hasOpenAiKey()) {
-    return "gpt-4o" as const;
+    return "gpt-5.4" as const;
   }
   if (hasAnthropicKey()) {
     return "claude-sonnet-4-6" as const;
@@ -988,7 +994,7 @@ export async function generateMinutesForMeeting(
   } else {
     const openai = getOpenAiClient();
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: OPENAI_MINUTES_MODEL,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: systemPrompt },

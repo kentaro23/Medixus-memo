@@ -73,6 +73,7 @@ async function createOrganization(formData: FormData) {
     .insert({
       name: nameValue.trim(),
       slug,
+      default_llm: "gpt-5.4",
     })
     .select("id, slug")
     .single();
