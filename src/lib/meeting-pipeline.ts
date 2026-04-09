@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import Anthropic from "@anthropic-ai/sdk";
-import ffmpegPath from "ffmpeg-static";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 
@@ -105,6 +105,8 @@ type SegmentedAudioFile = {
   mimeType: string;
 };
 
+let cachedFfmpegExecutable: string | null | undefined;
+
 function getOpenAiClient() {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is not set.");
@@ -145,6 +147,28 @@ function getDurationFromWhisperTranscription(transcription: WhisperTranscription
   return 0;
 }
 
+function resolveFfmpegExecutable() {
+  if (cachedFfmpegExecutable !== undefined) {
+    return cachedFfmpegExecutable;
+  }
+
+  const envConfigured = process.env.FFMPEG_PATH?.trim();
+  if (envConfigured) {
+    cachedFfmpegExecutable = envConfigured;
+    return cachedFfmpegExecutable;
+  }
+
+  try {
+    const require = createRequire(import.meta.url);
+    const resolved = require("ffmpeg-static") as string | null;
+    cachedFfmpegExecutable = resolved;
+    return cachedFfmpegExecutable;
+  } catch {
+    cachedFfmpegExecutable = null;
+    return cachedFfmpegExecutable;
+  }
+}
+
 function getExtensionFromAudioPath(audioPath: string) {
   const basename = path.basename(audioPath);
   const index = basename.lastIndexOf(".");
@@ -161,7 +185,7 @@ function getExtensionFromAudioPath(audioPath: string) {
 }
 
 async function runFfmpeg(args: string[]) {
-  const executable = ffmpegPath;
+  const executable = resolveFfmpegExecutable();
 
   if (!executable) {
     throw new Error(
@@ -180,6 +204,14 @@ async function runFfmpeg(args: string[]) {
     });
 
     child.on("error", (error) => {
+      if ("code" in error && error.code === "ENOENT") {
+        reject(
+          new Error(
+            "サーバー側でffmpeg実行ファイルを見つけられませんでした。しばらく待って再試行してください。",
+          ),
+        );
+        return;
+      }
       reject(error);
     });
 
