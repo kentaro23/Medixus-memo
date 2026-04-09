@@ -99,8 +99,15 @@ export type GeneratedMinutesPayload = {
   new_term_candidates: NewTermCandidate[];
 };
 
+export type MinutesDetailMode = "standard" | "detailed";
+
 type GenerateMinutesOptions = {
   adminClient?: AdminClient;
+  detailMode?: MinutesDetailMode;
+};
+
+type TranscribeMeetingOptions = {
+  detailMode?: MinutesDetailMode;
 };
 
 const MAX_WHISPER_PROMPT_LENGTH = 800;
@@ -665,12 +672,27 @@ ${newTermsPart || "- なし"}
 `;
 }
 
-function buildSystemPrompt(glossaryText: string) {
+function normalizeMinutesDetailMode(mode: unknown): MinutesDetailMode {
+  return mode === "detailed" ? "detailed" : "standard";
+}
+
+function buildSystemPrompt(glossaryText: string, detailMode: MinutesDetailMode) {
+  const detailInstruction =
+    detailMode === "detailed"
+      ? `
+【詳細モードの追加要件】
+- sections の content は要点だけでなく、議論の背景・論拠・比較案・懸念点・次アクションまで具体的に記述する
+- 重要な議題は 2〜5 個の小見出しを作り、時系列が追えるように書く
+- decisions / todos / open_questions は漏れがないよう、曖昧な主語を避けて具体化する
+- summary は300字上限内で、結論と根拠を簡潔に含める`
+      : "";
+
   return `あなたは医療・研究現場の議事録作成専門アシスタントです。
 以下の専門用語辞書を踏まえて、文字起こしから構造化された議事録を作成してください。
 
 【組織の専門用語辞書】
 ${glossaryText}
+${detailInstruction}
 
 【出力要件】
 1. 文中で専門用語が登場したら必ず {{term:正式表記}} の記法でマークしてください
@@ -744,9 +766,10 @@ function resolveAvailableLlm(preferred: "claude-sonnet-4-6" | "gpt-4o") {
   throw new Error("OPENAI_API_KEY と ANTHROPIC_API_KEY の両方が未設定です。");
 }
 
-export async function transcribeMeeting(meetingId: string) {
+export async function transcribeMeeting(meetingId: string, options?: TranscribeMeetingOptions) {
   const admin = createAdminClient();
   const openai = getOpenAiClient();
+  const detailMode = normalizeMinutesDetailMode(options?.detailMode);
 
   const { data: meeting } = await admin
     .from("meetings")
@@ -853,7 +876,10 @@ export async function transcribeMeeting(meetingId: string) {
       })
       .eq("id", meetingId);
 
-    const minutes = await generateMinutesForMeeting(meetingId, { adminClient: admin });
+    const minutes = await generateMinutesForMeeting(meetingId, {
+      adminClient: admin,
+      detailMode,
+    });
 
     return {
       meetingId,
@@ -872,6 +898,7 @@ export async function generateMinutesForMeeting(
   options?: GenerateMinutesOptions,
 ) {
   const admin = options?.adminClient ?? createAdminClient();
+  const detailMode = normalizeMinutesDetailMode(options?.detailMode);
 
   const { data: meeting } = await admin
     .from("meetings")
@@ -907,7 +934,7 @@ export async function generateMinutesForMeeting(
     .join("\n");
 
   const llm = resolveAvailableLlm(getPreferredLlm(meeting.llm_used ?? organization?.default_llm));
-  const systemPrompt = buildSystemPrompt(glossaryText);
+  const systemPrompt = buildSystemPrompt(glossaryText, detailMode);
   const userPrompt = `【文字起こし】\n${meeting.corrected_transcript}`;
 
   let rawResultJson = "";

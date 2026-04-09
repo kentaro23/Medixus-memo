@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { transcribeMeeting } from "@/lib/meeting-pipeline";
+import { transcribeMeeting, type MinutesDetailMode } from "@/lib/meeting-pipeline";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -12,6 +12,10 @@ type MeetingAuthRow = {
   organization_id: string;
 };
 
+function normalizeMinutesDetailMode(value: unknown): MinutesDetailMode {
+  return value === "detailed" ? "detailed" : "standard";
+}
+
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const {
@@ -22,8 +26,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = (await request.json().catch(() => null)) as { meetingId?: string } | null;
+  const body = (await request.json().catch(() => null)) as
+    | { meetingId?: string; detailMode?: string }
+    | null;
   const meetingId = body?.meetingId?.trim();
+  const detailMode = normalizeMinutesDetailMode(body?.detailMode);
 
   if (!meetingId) {
     return NextResponse.json({ error: "meetingId is required." }, { status: 400 });
@@ -40,7 +47,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const result = await transcribeMeeting(meetingId);
+    const result = await transcribeMeeting(meetingId, { detailMode });
     return NextResponse.json({ success: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

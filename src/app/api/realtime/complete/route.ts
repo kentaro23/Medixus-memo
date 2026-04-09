@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { generateMinutesForMeeting } from "@/lib/meeting-pipeline";
+import { generateMinutesForMeeting, type MinutesDetailMode } from "@/lib/meeting-pipeline";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -12,6 +12,7 @@ type RequestBody = {
   organizationId?: string;
   realtimeSessionId?: string;
   transcript?: string;
+  detailMode?: string;
 };
 
 type MeetingRow = {
@@ -32,6 +33,10 @@ type CorrectionRow = {
 
 function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeMinutesDetailMode(value: unknown): MinutesDetailMode {
+  return value === "detailed" ? "detailed" : "standard";
 }
 
 function escapeRegex(input: string) {
@@ -82,6 +87,7 @@ export async function POST(request: NextRequest) {
   const organizationId = normalizeText(body?.organizationId);
   const realtimeSessionId = normalizeText(body?.realtimeSessionId);
   const transcript = normalizeText(body?.transcript);
+  const detailMode = normalizeMinutesDetailMode(body?.detailMode);
 
   if (!meetingId || !organizationId || !realtimeSessionId || !transcript) {
     return NextResponse.json(
@@ -163,7 +169,7 @@ export async function POST(request: NextRequest) {
     .eq("id", meetingId);
 
   try {
-    const minutes = await generateMinutesForMeeting(meetingId);
+    const minutes = await generateMinutesForMeeting(meetingId, { detailMode });
     return NextResponse.json({
       success: true,
       meetingId,

@@ -5,7 +5,11 @@ import { MinutesRenderer } from "@/components/MinutesRenderer";
 import { PageShell } from "@/components/app/page-shell";
 import { CommentSidebar } from "@/components/comments/CommentSidebar";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { generateMinutesForMeeting, transcribeMeeting } from "@/lib/meeting-pipeline";
+import {
+  generateMinutesForMeeting,
+  transcribeMeeting,
+  type MinutesDetailMode,
+} from "@/lib/meeting-pipeline";
 import { requireOrganizationContext } from "@/lib/org-context";
 import { cn } from "@/lib/utils";
 
@@ -69,6 +73,10 @@ function redirectWithMessage(
 
 function normalizeText(value: FormDataEntryValue | null) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeMinutesDetailMode(value: FormDataEntryValue | null): MinutesDetailMode {
+  return value === "detailed" ? "detailed" : "standard";
 }
 
 function parseNewTermCandidates(raw: unknown): NewTermCandidate[] {
@@ -176,32 +184,36 @@ async function loadMeetingForOrg(orgSlug: string, meetingId: string) {
   return { supabase, organization, user, meeting };
 }
 
-async function startTranscriptionAction(orgSlug: string, meetingId: string) {
+async function startTranscriptionAction(orgSlug: string, meetingId: string, formData: FormData) {
   "use server";
 
   const { meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+  const detailMode = normalizeMinutesDetailMode(formData.get("detailMode"));
 
   if (!meeting.audio_url) {
     redirectWithMessage(orgSlug, meetingId, "error", "音声ファイルが未登録です。");
   }
 
   try {
-    await transcribeMeeting(meetingId);
+    await transcribeMeeting(meetingId, { detailMode });
     redirectWithMessage(
       orgSlug,
       meetingId,
       "success",
-      "文字起こしと議事録生成が完了しました。",
+      detailMode === "detailed"
+        ? "文字起こしと議事録生成（詳細モード）が完了しました。"
+        : "文字起こしと議事録生成が完了しました。",
     );
   } catch (error) {
     redirectWithMessage(orgSlug, meetingId, "error", formatTranscriptionError(error));
   }
 }
 
-async function regenerateMinutesAction(orgSlug: string, meetingId: string) {
+async function regenerateMinutesAction(orgSlug: string, meetingId: string, formData: FormData) {
   "use server";
 
   const { supabase, meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+  const detailMode = normalizeMinutesDetailMode(formData.get("detailMode"));
 
   if (!meeting.corrected_transcript) {
     redirectWithMessage(
@@ -215,8 +227,15 @@ async function regenerateMinutesAction(orgSlug: string, meetingId: string) {
   await supabase.from("meetings").update({ status: "generating" }).eq("id", meetingId);
 
   try {
-    await generateMinutesForMeeting(meetingId);
-    redirectWithMessage(orgSlug, meetingId, "success", "議事録を再生成しました。");
+    await generateMinutesForMeeting(meetingId, { detailMode });
+    redirectWithMessage(
+      orgSlug,
+      meetingId,
+      "success",
+      detailMode === "detailed"
+        ? "議事録を詳細モードで再生成しました。"
+        : "議事録を再生成しました。",
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     redirectWithMessage(orgSlug, meetingId, "error", `議事録再生成に失敗しました: ${message}`);
@@ -372,6 +391,16 @@ export default async function MeetingDetailPage({
         <div className="flex flex-wrap gap-2 pt-2">
           {meeting.audio_url ? (
             <form action={startTranscriptionAction.bind(null, orgSlug, meetingId)}>
+              <div className="mb-2">
+                <select
+                  name="detailMode"
+                  defaultValue="standard"
+                  className="rounded-md border bg-background px-3 py-2 text-sm"
+                >
+                  <option value="standard">標準モード</option>
+                  <option value="detailed">詳細モード（より細かく記述）</option>
+                </select>
+              </div>
               <Button type="submit" disabled={meeting.status === "transcribing" || meeting.status === "generating"}>
                 文字起こしを開始
               </Button>
@@ -380,6 +409,16 @@ export default async function MeetingDetailPage({
 
           {meeting.corrected_transcript ? (
             <form action={regenerateMinutesAction.bind(null, orgSlug, meetingId)}>
+              <div className="mb-2">
+                <select
+                  name="detailMode"
+                  defaultValue="standard"
+                  className="rounded-md border bg-background px-3 py-2 text-sm"
+                >
+                  <option value="standard">標準モード</option>
+                  <option value="detailed">詳細モード（より細かく記述）</option>
+                </select>
+              </div>
               <Button
                 type="submit"
                 variant="outline"
@@ -396,7 +435,13 @@ export default async function MeetingDetailPage({
         <div className="space-y-3">
           <h2 className="text-sm font-semibold">議事録本文</h2>
           {meeting.minutes_markdown ? (
-            <MinutesRenderer markdown={meeting.minutes_markdown} glossaryTerms={terms} orgSlug={orgSlug} />
+            <MinutesRenderer
+              markdown={meeting.minutes_markdown}
+              glossaryTerms={terms}
+              orgSlug={orgSlug}
+              meetingId={meeting.id}
+              organizationId={meeting.organization_id}
+            />
           ) : (
             <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground">
               まだ議事録は生成されていません。
