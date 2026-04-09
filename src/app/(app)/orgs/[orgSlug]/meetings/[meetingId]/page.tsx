@@ -134,6 +134,21 @@ function statusLabel(status: MeetingDetailRow["status"]) {
   }
 }
 
+function formatTranscriptionError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Unknown error";
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes("maximum content size limit") ||
+    normalized.includes("content size limit") ||
+    normalized.includes("status code 413") ||
+    normalized.includes(" 413:")
+  ) {
+    return "音声サイズがWhisper上限を超えました。24MB以下に圧縮または分割して再実行してください。";
+  }
+
+  return `処理に失敗しました: ${message}`;
+}
+
 async function loadMeetingForOrg(orgSlug: string, meetingId: string) {
   const nextPath = `/orgs/${orgSlug}/meetings/${meetingId}`;
   const { supabase, organization, user } = await requireOrganizationContext({
@@ -175,8 +190,7 @@ async function startTranscriptionAction(orgSlug: string, meetingId: string) {
       "文字起こしと議事録生成が完了しました。",
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    redirectWithMessage(orgSlug, meetingId, "error", `処理に失敗しました: ${message}`);
+    redirectWithMessage(orgSlug, meetingId, "error", formatTranscriptionError(error));
   }
 }
 

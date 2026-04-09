@@ -88,6 +88,7 @@ type GenerateMinutesOptions = {
 };
 
 const MAX_WHISPER_PROMPT_LENGTH = 800;
+const WHISPER_SAFE_FILE_BYTES = 24 * 1024 * 1024;
 
 function getOpenAiClient() {
   if (!process.env.OPENAI_API_KEY) {
@@ -101,6 +102,20 @@ function getAnthropicClient() {
     throw new Error("ANTHROPIC_API_KEY is not set.");
   }
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}
+
+function formatMiB(bytes: number) {
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+function isWhisperPayloadLimitError(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("maximum content size limit") ||
+    normalized.includes("content size limit") ||
+    normalized.includes("status code 413") ||
+    normalized.includes(" 413:")
+  );
 }
 
 function normalizeWhisperPromptTerms(terms: GlossaryPromptTermRow[]) {
@@ -443,6 +458,13 @@ export async function transcribeMeeting(meetingId: string) {
       throw new Error(`Audio download failed: ${downloadError?.message ?? "unknown error"}`);
     }
 
+    if (audioBlob.size > WHISPER_SAFE_FILE_BYTES) {
+      throw new Error(
+        `音声ファイルが大きすぎます（${formatMiB(audioBlob.size)}MB）。` +
+          " Whisper APIはmultipart送信の都合で24MB以下でないと失敗しやすいため、分割または圧縮してください。",
+      );
+    }
+
     const extension = meeting.audio_url.includes(".")
       ? meeting.audio_url.slice(meeting.audio_url.lastIndexOf("."))
       : ".wav";
@@ -452,14 +474,25 @@ export async function transcribeMeeting(meetingId: string) {
       { type: audioBlob.type || "audio/mpeg" },
     );
 
-    const transcription = await openai.audio.transcriptions.create({
-      file: uploadFile,
-      model: "whisper-1",
-      language: "ja",
-      prompt: whisperPrompt,
-      response_format: "verbose_json",
-      timestamp_granularities: ["segment"],
-    });
+    let transcription: Awaited<ReturnType<typeof openai.audio.transcriptions.create>>;
+    try {
+      transcription = await openai.audio.transcriptions.create({
+        file: uploadFile,
+        model: "whisper-1",
+        language: "ja",
+        prompt: whisperPrompt,
+        response_format: "verbose_json",
+        timestamp_granularities: ["segment"],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isWhisperPayloadLimitError(message)) {
+        throw new Error(
+          "Whisper APIのサイズ上限に達しました。音声を24MB以下に分割または圧縮して再実行してください。",
+        );
+      }
+      throw error;
+    }
 
     const rawTranscript = (transcription.text ?? "").trim();
 
@@ -470,13 +503,17 @@ export async function transcribeMeeting(meetingId: string) {
       .eq("apply_globally", true);
 
     const correctedTranscript = applyCorrections(rawTranscript, (correctionRows ?? []) as CorrectionRow[]);
+    const transcriptionDuration =
+      "duration" in transcription && typeof transcription.duration === "number"
+        ? transcription.duration
+        : 0;
 
     await admin
       .from("meetings")
       .update({
         raw_transcript: rawTranscript,
         corrected_transcript: correctedTranscript,
-        duration_seconds: Math.round(Number(transcription.duration ?? 0)),
+        duration_seconds: Math.round(transcriptionDuration),
         status: "generating",
       })
       .eq("id", meetingId);
