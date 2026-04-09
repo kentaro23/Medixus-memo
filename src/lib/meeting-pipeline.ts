@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -157,6 +166,35 @@ async function isExecutable(filePath: string) {
   }
 }
 
+async function fileExists(filePath: string) {
+  try {
+    await access(filePath, fsConstants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureExecutablePath(filePath: string) {
+  if (await isExecutable(filePath)) {
+    return filePath;
+  }
+
+  if (!(await fileExists(filePath))) {
+    return null;
+  }
+
+  const tempExecutable = path.join(tmpdir(), `medixus-ffmpeg-${Date.now()}`);
+  await copyFile(filePath, tempExecutable);
+  await chmod(tempExecutable, 0o755);
+
+  if (await isExecutable(tempExecutable)) {
+    return tempExecutable;
+  }
+
+  return null;
+}
+
 async function resolveFfmpegExecutable() {
   if (cachedFfmpegExecutable !== undefined) {
     return cachedFfmpegExecutable;
@@ -188,8 +226,9 @@ async function resolveFfmpegExecutable() {
     if (!candidate) {
       continue;
     }
-    if (await isExecutable(candidate)) {
-      cachedFfmpegExecutable = candidate;
+    const executablePath = await ensureExecutablePath(candidate);
+    if (executablePath) {
+      cachedFfmpegExecutable = executablePath;
       return cachedFfmpegExecutable;
     }
   }
