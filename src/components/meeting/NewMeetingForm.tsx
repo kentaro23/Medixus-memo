@@ -18,12 +18,6 @@ function normalizeText(value: string) {
   return value.trim();
 }
 
-const RECOMMENDED_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
-
-function formatMiB(bytes: number) {
-  return (bytes / (1024 * 1024)).toFixed(1);
-}
-
 function sanitizeFilename(filename: string) {
   const normalized = filename.trim().replace(/[^a-zA-Z0-9._-]/g, "-");
   return normalized.length > 0 ? normalized : "audio.wav";
@@ -84,14 +78,6 @@ export function NewMeetingForm({
 
     if (!audioFile) {
       setError("音声ファイルを選択してください。");
-      return;
-    }
-
-    if (audioFile.size > RECOMMENDED_MAX_AUDIO_BYTES) {
-      setError(
-        `ファイルサイズが大きすぎます（${formatMiB(audioFile.size)}MB）。` +
-          " Whisper APIはmultipart送信時に25MBを超えやすいため、24MB以下に圧縮または分割してください。",
-      );
       return;
     }
 
@@ -243,7 +229,7 @@ export function NewMeetingForm({
           className="w-full rounded-md border bg-background px-3 py-2 text-sm"
         />
         <p className="text-xs text-muted-foreground">
-          Supabase Storageへ直接アップロードします。Whisper文字起こしは24MB以下を推奨します。
+          Supabase Storageへ直接アップロードします。24MB超の音声はサーバー側で自動分割して文字起こしします。
         </p>
       </div>
 

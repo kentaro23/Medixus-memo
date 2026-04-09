@@ -1,4 +1,10 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import Anthropic from "@anthropic-ai/sdk";
+import ffmpegPath from "ffmpeg-static";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 
@@ -89,6 +95,15 @@ type GenerateMinutesOptions = {
 
 const MAX_WHISPER_PROMPT_LENGTH = 800;
 const WHISPER_SAFE_FILE_BYTES = 24 * 1024 * 1024;
+const WHISPER_SEGMENT_SECONDS = 20 * 60;
+const WHISPER_SEGMENT_MIME_TYPE = "audio/mp4";
+
+type WhisperTranscription = Awaited<ReturnType<OpenAI["audio"]["transcriptions"]["create"]>>;
+type SegmentedAudioFile = {
+  filename: string;
+  buffer: Buffer;
+  mimeType: string;
+};
 
 function getOpenAiClient() {
   if (!process.env.OPENAI_API_KEY) {
@@ -116,6 +131,187 @@ function isWhisperPayloadLimitError(message: string) {
     normalized.includes("status code 413") ||
     normalized.includes(" 413:")
   );
+}
+
+function getDurationFromWhisperTranscription(transcription: WhisperTranscription) {
+  if (!transcription || typeof transcription !== "object") {
+    return 0;
+  }
+
+  if ("duration" in transcription && typeof transcription.duration === "number") {
+    return transcription.duration;
+  }
+
+  return 0;
+}
+
+function getExtensionFromAudioPath(audioPath: string) {
+  const basename = path.basename(audioPath);
+  const index = basename.lastIndexOf(".");
+  if (index === -1) {
+    return ".wav";
+  }
+
+  const extension = basename.slice(index).toLowerCase();
+  if (/^\.[a-z0-9]{1,8}$/.test(extension)) {
+    return extension;
+  }
+
+  return ".wav";
+}
+
+async function runFfmpeg(args: string[]) {
+  const executable = ffmpegPath;
+
+  if (!executable) {
+    throw new Error(
+      "サーバー側の音声分割エンジン(ffmpeg)が利用できません。音声を24MB以下に分割して再実行してください。",
+    );
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(executable, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          `ffmpeg segmentation failed (code=${code}): ${stderr.trim() || "unknown error"}`,
+        ),
+      );
+    });
+  });
+}
+
+async function segmentAudioForWhisper(audioBlob: Blob, extension: string) {
+  const tempDirectory = await mkdtemp(path.join(tmpdir(), "medixus-whisper-"));
+
+  try {
+    const inputPath = path.join(tempDirectory, `input${extension || ".wav"}`);
+    const outputPattern = path.join(tempDirectory, "segment-%03d.m4a");
+
+    const inputBuffer = Buffer.from(await audioBlob.arrayBuffer());
+    await writeFile(inputPath, inputBuffer);
+
+    await runFfmpeg([
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-y",
+      "-i",
+      inputPath,
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "48k",
+      "-f",
+      "segment",
+      "-segment_time",
+      String(WHISPER_SEGMENT_SECONDS),
+      "-reset_timestamps",
+      "1",
+      outputPattern,
+    ]);
+
+    const entries = await readdir(tempDirectory);
+    const segmentNames = entries
+      .filter((entry) => /^segment-\d{3}\.m4a$/i.test(entry))
+      .sort((left, right) => left.localeCompare(right));
+
+    if (segmentNames.length === 0) {
+      throw new Error(
+        "音声ファイルの分割に失敗しました。元音声をMP3/M4Aに変換して再度アップロードしてください。",
+      );
+    }
+
+    const segments: SegmentedAudioFile[] = [];
+    for (const segmentName of segmentNames) {
+      const filePath = path.join(tempDirectory, segmentName);
+      const buffer = await readFile(filePath);
+      segments.push({
+        filename: segmentName,
+        buffer,
+        mimeType: WHISPER_SEGMENT_MIME_TYPE,
+      });
+    }
+
+    return segments;
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+}
+
+async function transcribeWithWhisper({
+  openai,
+  fileBuffer,
+  filename,
+  mimeType,
+  prompt,
+}: {
+  openai: OpenAI;
+  fileBuffer: Buffer;
+  filename: string;
+  mimeType: string;
+  prompt: string;
+}) {
+  const uploadFile = await toFile(fileBuffer, filename, { type: mimeType });
+
+  let transcription: WhisperTranscription;
+  try {
+    transcription = await openai.audio.transcriptions.create({
+      file: uploadFile,
+      model: "whisper-1",
+      language: "ja",
+      prompt,
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment"],
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isWhisperPayloadLimitError(message)) {
+      throw new Error(
+        "Whisper APIのサイズ上限に達しました。音声をさらに短く分割するか、低ビットレートに圧縮してください。",
+      );
+    }
+    throw error;
+  }
+
+  let text = "";
+  if (typeof transcription === "string") {
+    text = transcription;
+  } else if (
+    transcription &&
+    typeof transcription === "object" &&
+    "text" in transcription &&
+    typeof transcription.text === "string"
+  ) {
+    text = transcription.text;
+  }
+
+  return {
+    text: text.trim(),
+    durationSeconds: getDurationFromWhisperTranscription(transcription),
+  };
 }
 
 function normalizeWhisperPromptTerms(terms: GlossaryPromptTermRow[]) {
@@ -458,43 +654,55 @@ export async function transcribeMeeting(meetingId: string) {
       throw new Error(`Audio download failed: ${downloadError?.message ?? "unknown error"}`);
     }
 
-    if (audioBlob.size > WHISPER_SAFE_FILE_BYTES) {
-      throw new Error(
-        `音声ファイルが大きすぎます（${formatMiB(audioBlob.size)}MB）。` +
-          " Whisper APIはmultipart送信の都合で24MB以下でないと失敗しやすいため、分割または圧縮してください。",
-      );
-    }
+    const extension = getExtensionFromAudioPath(meeting.audio_url);
+    let rawTranscript = "";
+    let transcriptionDurationSeconds = 0;
 
-    const extension = meeting.audio_url.includes(".")
-      ? meeting.audio_url.slice(meeting.audio_url.lastIndexOf("."))
-      : ".wav";
-    const uploadFile = await toFile(
-      Buffer.from(await audioBlob.arrayBuffer()),
-      `meeting-audio${extension}`,
-      { type: audioBlob.type || "audio/mpeg" },
-    );
-
-    let transcription: Awaited<ReturnType<typeof openai.audio.transcriptions.create>>;
-    try {
-      transcription = await openai.audio.transcriptions.create({
-        file: uploadFile,
-        model: "whisper-1",
-        language: "ja",
+    if (audioBlob.size <= WHISPER_SAFE_FILE_BYTES) {
+      const singleResult = await transcribeWithWhisper({
+        openai,
+        fileBuffer: Buffer.from(await audioBlob.arrayBuffer()),
+        filename: `meeting-audio${extension}`,
+        mimeType: audioBlob.type || "audio/mpeg",
         prompt: whisperPrompt,
-        response_format: "verbose_json",
-        timestamp_granularities: ["segment"],
       });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (isWhisperPayloadLimitError(message)) {
-        throw new Error(
-          "Whisper APIのサイズ上限に達しました。音声を24MB以下に分割または圧縮して再実行してください。",
-        );
+
+      rawTranscript = singleResult.text;
+      transcriptionDurationSeconds = singleResult.durationSeconds;
+    } else {
+      const segmentedAudioFiles = await segmentAudioForWhisper(audioBlob, extension);
+      const chunkTexts: string[] = [];
+
+      for (let index = 0; index < segmentedAudioFiles.length; index += 1) {
+        const chunk = segmentedAudioFiles[index];
+
+        if (chunk.buffer.byteLength > WHISPER_SAFE_FILE_BYTES) {
+          throw new Error(
+            `分割後の音声チャンクが大きすぎます（${formatMiB(chunk.buffer.byteLength)}MB）。` +
+              " 元音声をさらに圧縮して再実行してください。",
+          );
+        }
+
+        const chunkResult = await transcribeWithWhisper({
+          openai,
+          fileBuffer: chunk.buffer,
+          filename: chunk.filename,
+          mimeType: chunk.mimeType,
+          prompt: whisperPrompt,
+        });
+
+        if (chunkResult.text) {
+          chunkTexts.push(chunkResult.text);
+        }
+        transcriptionDurationSeconds += chunkResult.durationSeconds;
       }
-      throw error;
+
+      rawTranscript = chunkTexts.join("\n").trim();
     }
 
-    const rawTranscript = (transcription.text ?? "").trim();
+    if (!rawTranscript) {
+      throw new Error("文字起こし結果が空でした。別形式の音声で再実行してください。");
+    }
 
     const { data: correctionRows } = await admin
       .from("transcription_corrections")
@@ -502,18 +710,17 @@ export async function transcribeMeeting(meetingId: string) {
       .eq("organization_id", meeting.organization_id)
       .eq("apply_globally", true);
 
-    const correctedTranscript = applyCorrections(rawTranscript, (correctionRows ?? []) as CorrectionRow[]);
-    const transcriptionDuration =
-      "duration" in transcription && typeof transcription.duration === "number"
-        ? transcription.duration
-        : 0;
+    const correctedTranscript = applyCorrections(
+      rawTranscript,
+      (correctionRows ?? []) as CorrectionRow[],
+    );
 
     await admin
       .from("meetings")
       .update({
         raw_transcript: rawTranscript,
         corrected_transcript: correctedTranscript,
-        duration_seconds: Math.round(transcriptionDuration),
+        duration_seconds: Math.round(transcriptionDurationSeconds),
         status: "generating",
       })
       .eq("id", meetingId);

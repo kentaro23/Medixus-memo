@@ -324,6 +324,19 @@ export default async function MeetingDetailPage({
         >
           文字起こし全文
         </Link>
+        <Link
+          href={`/api/meetings/${meetingId}/export?format=markdown`}
+          className={cn(buttonVariants({ variant: "outline" }))}
+        >
+          Markdown出力
+        </Link>
+        <Link
+          href={`/api/meetings/${meetingId}/export?format=pdf`}
+          target="_blank"
+          className={cn(buttonVariants({ variant: "outline" }))}
+        >
+          PDF出力
+        </Link>
       </div>
 
       {message ? (
