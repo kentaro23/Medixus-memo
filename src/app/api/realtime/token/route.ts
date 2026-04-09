@@ -28,6 +28,8 @@ type GlossaryTermRow = {
 
 const DEFAULT_REALTIME_MODEL =
   process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-4o-realtime-preview-2024-12-17";
+const DEFAULT_REALTIME_TRANSCRIBE_MODEL =
+  process.env.OPENAI_REALTIME_TRANSCRIBE_MODEL?.trim() || "gpt-4o-transcribe";
 
 function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -155,9 +157,27 @@ ${glossaryHint ? `専門用語ヒント: ${glossaryHint}` : ""}`;
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      type: "transcription",
       model: DEFAULT_REALTIME_MODEL,
-      modalities: ["text"],
       instructions,
+      audio: {
+        input: {
+          transcription: {
+            model: DEFAULT_REALTIME_TRANSCRIBE_MODEL,
+            language: "ja",
+            prompt: glossaryHint || "",
+          },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 500,
+          },
+          noise_reduction: {
+            type: "near_field",
+          },
+        },
+      },
     }),
   });
 

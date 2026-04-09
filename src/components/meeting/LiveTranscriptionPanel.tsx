@@ -40,13 +40,18 @@ function getEventText(value: unknown): string {
       transcript?: unknown;
       text?: unknown;
     };
+    error?: {
+      message?: unknown;
+    };
   };
 
   const type = normalizeText(event.type);
 
   if (
     type === "conversation.item.input_audio_transcription.completed" ||
-    type === "response.output_text.done"
+    type === "response.output_text.done" ||
+    type === "response.output_audio_transcript.done" ||
+    type === "transcript.text.done"
   ) {
     return (
       normalizeText(event.transcript) ||
@@ -73,7 +78,9 @@ function getEventDelta(value: unknown): string {
 
   if (
     type === "conversation.item.input_audio_transcription.delta" ||
-    type === "response.output_text.delta"
+    type === "response.output_text.delta" ||
+    type === "response.output_audio_transcript.delta" ||
+    type === "transcript.text.delta"
   ) {
     return normalizeText(event.delta);
   }
@@ -210,6 +217,20 @@ export function LiveTranscriptionPanel({
       dataChannel.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data) as unknown;
+          if (
+            payload &&
+            typeof payload === "object" &&
+            "type" in payload &&
+            normalizeText((payload as { type?: unknown }).type) === "error"
+          ) {
+            const errorMessage = normalizeText(
+              (payload as { error?: { message?: unknown } }).error?.message,
+            );
+            if (errorMessage) {
+              setError(`Realtimeエラー: ${errorMessage}`);
+            }
+          }
+
           const delta = getEventDelta(payload);
           if (delta) {
             partialRef.current += delta;
@@ -225,19 +246,6 @@ export function LiveTranscriptionPanel({
         } catch {
           // Ignore non-JSON events.
         }
-      };
-
-      dataChannel.onopen = () => {
-        dataChannel.send(
-          JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["text"],
-              instructions:
-                "入力された音声を日本語で文字起こししてください。回答は文字起こし本文のみで返してください。",
-            },
-          }),
-        );
       };
 
       const offer = await peer.createOffer();
