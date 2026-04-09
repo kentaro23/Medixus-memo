@@ -67,6 +67,8 @@ type ExistingTermRow = {
   category: string | null;
 };
 
+const STALE_PROCESSING_MS = 10 * 60 * 1000;
+
 function redirectWithMessage(
   orgSlug: string,
   meetingId: string,
@@ -160,6 +162,19 @@ function statusLabel(status: MeetingDetailRow["status"]) {
     default:
       return status;
   }
+}
+
+function isStaleProcessing(meeting: Pick<MeetingDetailRow, "status" | "updated_at">) {
+  if (meeting.status !== "transcribing" && meeting.status !== "generating") {
+    return false;
+  }
+
+  const updatedAt = new Date(meeting.updated_at).getTime();
+  if (!Number.isFinite(updatedAt)) {
+    return false;
+  }
+
+  return Date.now() - updatedAt > STALE_PROCESSING_MS;
 }
 
 function formatTranscriptionError(error: unknown) {
@@ -260,6 +275,24 @@ async function regenerateMinutesAction(orgSlug: string, meetingId: string, formD
   );
 }
 
+async function markStaleAsFailedAction(orgSlug: string, meetingId: string) {
+  "use server";
+
+  const { supabase, meeting } = await loadMeetingForOrg(orgSlug, meetingId);
+
+  if (meeting.status === "transcribing" || meeting.status === "generating") {
+    await supabase.from("meetings").update({ status: "failed" }).eq("id", meetingId);
+    redirectWithMessage(
+      orgSlug,
+      meetingId,
+      "message",
+      "処理が停止していたため、再実行可能な状態に戻しました。",
+    );
+  }
+
+  redirectWithMessage(orgSlug, meetingId, "message", "現在のステータスに変更はありません。");
+}
+
 async function addCandidateToGlossaryAction(orgSlug: string, meetingId: string, formData: FormData) {
   "use server";
 
@@ -344,6 +377,9 @@ export default async function MeetingDetailPage({
   const terms = (glossaryTerms ?? []) as GlossaryLookupRow[];
   const newTermCandidates = parseNewTermCandidates(meeting.new_term_candidates);
   const blockIds = extractBlockIds(meeting.minutes_markdown);
+  const staleProcessing = isStaleProcessing(meeting);
+  const disableRunActions =
+    (meeting.status === "transcribing" || meeting.status === "generating") && !staleProcessing;
 
   const message = typeof parsedSearchParams.message === "string" ? parsedSearchParams.message : "";
   const success = typeof parsedSearchParams.success === "string" ? parsedSearchParams.success : "";
@@ -401,6 +437,16 @@ export default async function MeetingDetailPage({
         <p>
           ステータス: <span className="font-medium">{statusLabel(meeting.status)}</span>
         </p>
+        {staleProcessing ? (
+          <div className="rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <p>処理が停止している可能性があります（10分以上更新なし）。</p>
+            <form action={markStaleAsFailedAction.bind(null, orgSlug, meetingId)} className="mt-2">
+              <Button type="submit" variant="outline" size="sm">
+                停止扱いにして再実行可能にする
+              </Button>
+            </form>
+          </div>
+        ) : null}
         <MeetingProcessingIndicator status={meeting.status} />
         <p>LLM: {meeting.llm_used ?? "未指定"}</p>
         <p>開催日時: {meeting.meeting_date ? new Date(meeting.meeting_date).toLocaleString("ja-JP") : "-"}</p>
@@ -423,7 +469,7 @@ export default async function MeetingDetailPage({
               <ServerActionSubmitButton
                 idleLabel="文字起こしを開始"
                 pendingLabel="AI起動中..."
-                disabled={meeting.status === "transcribing" || meeting.status === "generating"}
+                disabled={disableRunActions}
               />
             </form>
           ) : null}
@@ -444,7 +490,7 @@ export default async function MeetingDetailPage({
                 idleLabel="議事録を再生成"
                 pendingLabel="AI再生成中..."
                 variant="outline"
-                disabled={meeting.status === "transcribing" || meeting.status === "generating"}
+                disabled={disableRunActions}
               />
             </form>
           ) : null}
