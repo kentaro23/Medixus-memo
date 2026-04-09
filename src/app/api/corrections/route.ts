@@ -39,6 +39,7 @@ type MeetingUpdateRow = {
   id: string;
   corrected_transcript: string | null;
   minutes_markdown: string | null;
+  new_term_candidates: unknown;
 };
 
 function normalizeText(value: unknown) {
@@ -86,6 +87,36 @@ function applySafeReplace(input: string | null, wrongText: string, correctText: 
   }
 
   return input.replace(buildSafeCorrectionRegex(wrongText), correctText);
+}
+
+function removeResolvedCandidate(rawCandidates: unknown, wrongText: string, correctText: string) {
+  if (!Array.isArray(rawCandidates)) {
+    return rawCandidates;
+  }
+
+  const normalizedWrong = normalizeText(wrongText).toLowerCase();
+  const normalizedCorrect = normalizeText(correctText).toLowerCase();
+
+  const filtered = rawCandidates.filter((candidate) => {
+    if (!candidate || typeof candidate !== "object") {
+      return true;
+    }
+
+    const row = candidate as Record<string, unknown>;
+    const term = normalizeText(typeof row.term === "string" ? row.term : "").toLowerCase();
+    const heardText = normalizeText(
+      typeof row.heard_text === "string" ? row.heard_text : "",
+    ).toLowerCase();
+
+    return !(
+      term === normalizedWrong ||
+      term === normalizedCorrect ||
+      heardText === normalizedWrong ||
+      heardText === normalizedCorrect
+    );
+  });
+
+  return filtered;
 }
 
 function mergeUnique(values: string[], nextValue: string) {
@@ -258,7 +289,7 @@ export async function POST(request: NextRequest) {
 
   const { data: meetings } = await supabase
     .from("meetings")
-    .select("id, corrected_transcript, minutes_markdown")
+    .select("id, corrected_transcript, minutes_markdown, new_term_candidates")
     .eq("organization_id", organizationId);
 
   let updatedMeetings = 0;
@@ -278,10 +309,15 @@ export async function POST(request: NextRequest) {
       wrongText,
       correctText,
     );
+    const nextCandidates =
+      meeting.id === meetingId
+        ? removeResolvedCandidate(meeting.new_term_candidates, wrongText, correctText)
+        : meeting.new_term_candidates;
 
     if (
       nextCorrectedTranscript === meeting.corrected_transcript &&
-      nextMinutesMarkdown === meeting.minutes_markdown
+      nextMinutesMarkdown === meeting.minutes_markdown &&
+      nextCandidates === meeting.new_term_candidates
     ) {
       continue;
     }
@@ -291,6 +327,7 @@ export async function POST(request: NextRequest) {
       .update({
         corrected_transcript: nextCorrectedTranscript,
         minutes_markdown: nextMinutesMarkdown,
+        new_term_candidates: nextCandidates,
       })
       .eq("id", meeting.id);
 

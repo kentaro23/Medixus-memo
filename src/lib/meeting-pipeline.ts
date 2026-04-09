@@ -86,6 +86,10 @@ type NewTermCandidate = {
   guess_full_form: string | null;
   guess_definition: string | null;
   guess_category: string | null;
+  review_needed: boolean;
+  heard_text: string | null;
+  context_excerpt: string | null;
+  question: string | null;
 };
 
 export type GeneratedMinutesPayload = {
@@ -531,6 +535,10 @@ function toNullableString(value: unknown) {
   return normalized ? normalized : null;
 }
 
+function toBoolean(value: unknown) {
+  return value === true;
+}
+
 function toMinutesItem(value: unknown): MinutesItem {
   if (!value || typeof value !== "object") {
     return { text: "", owner: null, due: null };
@@ -599,6 +607,10 @@ function normalizeGeneratedMinutesPayload(raw: unknown): GeneratedMinutesPayload
         guess_full_form: toNullableString(row.guess_full_form),
         guess_definition: toNullableString(row.guess_definition),
         guess_category: toNullableString(row.guess_category),
+        review_needed: toBoolean(row.review_needed),
+        heard_text: toNullableString(row.heard_text),
+        context_excerpt: toNullableString(row.context_excerpt),
+        question: toNullableString(row.question),
       };
     })
     .filter((candidate) => candidate.term.length > 0);
@@ -648,7 +660,10 @@ function renderMinutesMarkdown(parsed: GeneratedMinutesPayload) {
     .map((candidate) => {
       const fullForm = candidate.guess_full_form ? `（${candidate.guess_full_form}）` : "";
       const definition = candidate.guess_definition ?? "";
-      return `- **${candidate.term}**${fullForm}: ${definition}`;
+      const review = candidate.review_needed
+        ? `\n  - 要確認: ${candidate.question ?? "この部分の正しい用語を確認してください"}`
+        : "";
+      return `- **${candidate.term}**${fullForm}: ${definition}${review}`;
     })
     .join("\n");
 
@@ -709,6 +724,10 @@ ${detailInstruction}
 2. 辞書にない専門用語が登場したら new_term_candidates に含めてください
 3. 略語の正式名称や読み方が分かる場合は、新出用語の guess_definition に記載
 4. 略語が出てきたら detected_terms に必ず含めてください
+5. 聞き間違い・文字起こし揺れの可能性が高い語は new_term_candidates に review_needed=true で入れてください
+   - heard_text: 聞こえた表記（例: "P6J"）
+   - context_excerpt: 前後文脈（20〜60文字）
+   - question: ユーザーに確認する短い質問（例: "この部分は B6J でしょうか？"）
 
 【出力フォーマット（JSON）】
 {
@@ -738,7 +757,11 @@ ${detailInstruction}
       "term": "新出専門用語",
       "guess_full_form": "推定正式名称",
       "guess_definition": "推定意味",
-      "guess_category": "遺伝子/疾患名/略語/薬剤/手技/その他"
+      "guess_category": "遺伝子/疾患名/略語/薬剤/手技/その他",
+      "review_needed": false,
+      "heard_text": null,
+      "context_excerpt": null,
+      "question": null
     }
   ]
 }

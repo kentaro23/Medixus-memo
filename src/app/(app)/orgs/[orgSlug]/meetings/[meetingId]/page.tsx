@@ -4,6 +4,7 @@ import { notFound, redirect } from "next/navigation";
 import { MinutesRenderer } from "@/components/MinutesRenderer";
 import { PageShell } from "@/components/app/page-shell";
 import { CommentSidebar } from "@/components/comments/CommentSidebar";
+import { UncertainTermReviewCard } from "@/components/meeting/UncertainTermReviewCard";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   generateMinutesForMeeting,
@@ -50,6 +51,10 @@ type NewTermCandidate = {
   guess_full_form: string | null;
   guess_definition: string | null;
   guess_category: string | null;
+  review_needed: boolean;
+  heard_text: string | null;
+  context_excerpt: string | null;
+  question: string | null;
 };
 
 type ExistingTermRow = {
@@ -108,6 +113,15 @@ function parseNewTermCandidates(raw: unknown): NewTermCandidate[] {
           typeof row.guess_category === "string" && row.guess_category.trim()
             ? row.guess_category.trim()
             : null,
+        review_needed: row.review_needed === true,
+        heard_text:
+          typeof row.heard_text === "string" && row.heard_text.trim() ? row.heard_text.trim() : null,
+        context_excerpt:
+          typeof row.context_excerpt === "string" && row.context_excerpt.trim()
+            ? row.context_excerpt.trim()
+            : null,
+        question:
+          typeof row.question === "string" && row.question.trim() ? row.question.trim() : null,
       };
     })
     .filter((candidate): candidate is NewTermCandidate => Boolean(candidate));
@@ -467,31 +481,40 @@ export default async function MeetingDetailPage({
         ) : (
           <div className="space-y-3">
             {newTermCandidates.map((candidate) => (
-              <form
-                key={candidate.term}
-                action={addCandidateToGlossaryAction.bind(null, orgSlug, meetingId)}
-                className="rounded-lg border p-3 text-sm"
-              >
-                <input type="hidden" name="term" value={candidate.term} />
-                <input type="hidden" name="guessFullForm" value={candidate.guess_full_form ?? ""} />
-                <input type="hidden" name="guessDefinition" value={candidate.guess_definition ?? ""} />
-                <input type="hidden" name="guessCategory" value={candidate.guess_category ?? ""} />
+              candidate.review_needed ? (
+                <UncertainTermReviewCard
+                  key={`${candidate.term}-${candidate.heard_text ?? ""}`}
+                  organizationId={meeting.organization_id}
+                  meetingId={meeting.id}
+                  candidate={candidate}
+                />
+              ) : (
+                <form
+                  key={candidate.term}
+                  action={addCandidateToGlossaryAction.bind(null, orgSlug, meetingId)}
+                  className="rounded-lg border p-3 text-sm"
+                >
+                  <input type="hidden" name="term" value={candidate.term} />
+                  <input type="hidden" name="guessFullForm" value={candidate.guess_full_form ?? ""} />
+                  <input type="hidden" name="guessDefinition" value={candidate.guess_definition ?? ""} />
+                  <input type="hidden" name="guessCategory" value={candidate.guess_category ?? ""} />
 
-                <p className="font-medium">{candidate.term}</p>
-                {candidate.guess_full_form ? (
-                  <p className="text-xs text-muted-foreground">{candidate.guess_full_form}</p>
-                ) : null}
-                {candidate.guess_definition ? <p className="mt-1">{candidate.guess_definition}</p> : null}
-                {candidate.guess_category ? (
-                  <p className="mt-1 text-xs text-muted-foreground">カテゴリ推定: {candidate.guess_category}</p>
-                ) : null}
+                  <p className="font-medium">{candidate.term}</p>
+                  {candidate.guess_full_form ? (
+                    <p className="text-xs text-muted-foreground">{candidate.guess_full_form}</p>
+                  ) : null}
+                  {candidate.guess_definition ? <p className="mt-1">{candidate.guess_definition}</p> : null}
+                  {candidate.guess_category ? (
+                    <p className="mt-1 text-xs text-muted-foreground">カテゴリ推定: {candidate.guess_category}</p>
+                  ) : null}
 
-                <div className="mt-3">
-                  <Button type="submit" variant="outline">
-                    辞書に追加
-                  </Button>
-                </div>
-              </form>
+                  <div className="mt-3">
+                    <Button type="submit" variant="outline">
+                      辞書に追加
+                    </Button>
+                  </div>
+                </form>
+              )
             ))}
           </div>
         )}
