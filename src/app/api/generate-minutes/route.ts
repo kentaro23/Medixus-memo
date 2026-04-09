@@ -3,6 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateMinutesForMeeting } from "@/lib/meeting-pipeline";
 import { createClient } from "@/lib/supabase/server";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
 type MeetingAuthRow = {
   id: string;
   organization_id: string;

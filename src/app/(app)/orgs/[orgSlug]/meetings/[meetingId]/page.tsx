@@ -9,6 +9,10 @@ import { generateMinutesForMeeting, transcribeMeeting } from "@/lib/meeting-pipe
 import { requireOrganizationContext } from "@/lib/org-context";
 import { cn } from "@/lib/utils";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
 type Params = { orgSlug: string; meetingId: string };
 type SearchParams = Record<string, string | string[] | undefined>;
 
