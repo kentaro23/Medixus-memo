@@ -43,6 +43,33 @@ function escapeRegex(input: string) {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function isAsciiToken(text: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text);
+}
+
+function isRiskyShortToken(text: string) {
+  const value = text.trim();
+  if (!value) {
+    return true;
+  }
+
+  const length = [...value].length;
+  if (length <= 2) {
+    return true;
+  }
+
+  const isJapaneseToken = /^[一-龠ぁ-んァ-ヶー]+$/.test(value);
+  return isJapaneseToken && length <= 3;
+}
+
+function buildGlobalCorrectionRegex(wrongText: string) {
+  const escaped = escapeRegex(wrongText);
+  if (isAsciiToken(wrongText)) {
+    return new RegExp(`\\b${escaped}\\b`, "g");
+  }
+  return new RegExp(escaped, "g");
+}
+
 function applyCorrections(transcript: string, corrections: CorrectionRow[]) {
   let result = transcript;
 
@@ -51,9 +78,8 @@ function applyCorrections(transcript: string, corrections: CorrectionRow[]) {
       continue;
     }
 
-    const escaped = escapeRegex(correction.wrong_text);
-
     if (correction.context_keywords && correction.context_keywords.length > 0) {
+      const escaped = escapeRegex(correction.wrong_text);
       const regex = new RegExp(`(.{0,80})${escaped}(.{0,80})`, "g");
 
       result = result.replace(regex, (match, before: string, after: string) => {
@@ -66,7 +92,11 @@ function applyCorrections(transcript: string, corrections: CorrectionRow[]) {
       continue;
     }
 
-    result = result.replace(new RegExp(escaped, "g"), correction.correct_text);
+    if (isRiskyShortToken(correction.wrong_text)) {
+      continue;
+    }
+
+    result = result.replace(buildGlobalCorrectionRegex(correction.wrong_text), correction.correct_text);
   }
 
   return result;

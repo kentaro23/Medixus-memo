@@ -49,11 +49,60 @@ function toNullable(value: unknown) {
   return normalized.length > 0 ? normalized : null;
 }
 
-function applyLiteralReplace(input: string | null, wrongText: string, correctText: string) {
+function replaceFirstLiteral(input: string, wrongText: string, correctText: string) {
+  const index = input.indexOf(wrongText);
+  if (index === -1) {
+    return input;
+  }
+  return `${input.slice(0, index)}${correctText}${input.slice(index + wrongText.length)}`;
+}
+
+function isRiskyShortToken(text: string) {
+  const value = text.trim();
+  if (!value) {
+    return true;
+  }
+
+  const length = [...value].length;
+  if (length <= 2) {
+    return true;
+  }
+
+  const isJapaneseToken = /^[一-龠ぁ-んァ-ヶー]+$/.test(value);
+  return isJapaneseToken && length <= 3;
+}
+
+function applyContextAwareSingleReplace(
+  input: string | null,
+  wrongText: string,
+  correctText: string,
+  context: string,
+) {
   if (!input) {
     return input;
   }
-  return input.split(wrongText).join(correctText);
+
+  const trimmedContext = context.trim();
+  if (trimmedContext && trimmedContext.includes(wrongText)) {
+    const replacedContext = replaceFirstLiteral(trimmedContext, wrongText, correctText);
+    if (replacedContext !== trimmedContext) {
+      const contextIndex = input.indexOf(trimmedContext);
+      if (contextIndex !== -1) {
+        return (
+          input.slice(0, contextIndex) +
+          replacedContext +
+          input.slice(contextIndex + trimmedContext.length)
+        );
+      }
+    }
+  }
+
+  // 短い語は誤爆しやすいため、文脈一致しない場合は自動置換しない。
+  if (isRiskyShortToken(wrongText)) {
+    return input;
+  }
+
+  return replaceFirstLiteral(input, wrongText, correctText);
 }
 
 function mergeUnique(values: string[], nextValue: string) {
@@ -234,12 +283,18 @@ export async function POST(request: NextRequest) {
     await supabase
       .from("meetings")
       .update({
-        corrected_transcript: applyLiteralReplace(
+        corrected_transcript: applyContextAwareSingleReplace(
           meeting.corrected_transcript,
           wrongText,
           correctText,
+          context,
         ),
-        minutes_markdown: applyLiteralReplace(meeting.minutes_markdown, wrongText, correctText),
+        minutes_markdown: applyContextAwareSingleReplace(
+          meeting.minutes_markdown,
+          wrongText,
+          correctText,
+          context,
+        ),
       })
       .eq("id", meetingId);
   }
