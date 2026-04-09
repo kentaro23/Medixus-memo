@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -147,26 +148,54 @@ function getDurationFromWhisperTranscription(transcription: WhisperTranscription
   return 0;
 }
 
-function resolveFfmpegExecutable() {
+async function isExecutable(filePath: string) {
+  try {
+    await access(filePath, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveFfmpegExecutable() {
   if (cachedFfmpegExecutable !== undefined) {
     return cachedFfmpegExecutable;
   }
 
+  const candidates: string[] = [];
+
   const envConfigured = process.env.FFMPEG_PATH?.trim();
   if (envConfigured) {
-    cachedFfmpegExecutable = envConfigured;
-    return cachedFfmpegExecutable;
+    candidates.push(envConfigured);
   }
 
   try {
     const require = createRequire(import.meta.url);
-    const resolved = require("ffmpeg-static") as string | null;
-    cachedFfmpegExecutable = resolved;
-    return cachedFfmpegExecutable;
+    const moduleResolvedPath = require("ffmpeg-static") as string | null;
+    if (moduleResolvedPath) {
+      candidates.push(moduleResolvedPath);
+    }
+    const moduleEntry = require.resolve("ffmpeg-static");
+    candidates.push(path.join(path.dirname(moduleEntry), "ffmpeg"));
   } catch {
-    cachedFfmpegExecutable = null;
-    return cachedFfmpegExecutable;
+    // Ignore and continue fallback candidates.
   }
+
+  candidates.push(path.join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg"));
+  candidates.push(path.join(process.cwd(), ".next", "server", "chunks", "ffmpeg"));
+
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    if (await isExecutable(candidate)) {
+      cachedFfmpegExecutable = candidate;
+      return cachedFfmpegExecutable;
+    }
+  }
+
+  cachedFfmpegExecutable = null;
+  return cachedFfmpegExecutable;
 }
 
 function getExtensionFromAudioPath(audioPath: string) {
@@ -185,11 +214,11 @@ function getExtensionFromAudioPath(audioPath: string) {
 }
 
 async function runFfmpeg(args: string[]) {
-  const executable = resolveFfmpegExecutable();
+  const executable = await resolveFfmpegExecutable();
 
   if (!executable) {
     throw new Error(
-      "サーバー側の音声分割エンジン(ffmpeg)が利用できません。音声を24MB以下に分割して再実行してください。",
+      "サーバー側の音声分割エンジン(ffmpeg)が見つかりません。再実行しても同じ場合は管理者に連絡してください。",
     );
   }
 
