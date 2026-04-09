@@ -12,6 +12,11 @@ type StartResponse = {
   model: string;
 };
 
+type LocalCorrectionRule = {
+  wrongText: string;
+  correctText: string;
+};
+
 function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -24,6 +29,53 @@ function formatErrorMessage(error: unknown) {
     }
   }
   return "リアルタイム文字起こしに失敗しました。";
+}
+
+function escapeRegex(input: string) {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isAsciiToken(text: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text);
+}
+
+function buildSafeCorrectionRegex(wrongText: string) {
+  const escaped = escapeRegex(wrongText);
+
+  if (isAsciiToken(wrongText)) {
+    return new RegExp(`\\b${escaped}\\b`, "g");
+  }
+
+  if (/^[ァ-ヶー]+$/.test(wrongText)) {
+    return new RegExp(`(?<![ァ-ヶー])${escaped}(?![ァ-ヶー])`, "g");
+  }
+
+  if (/^[ぁ-んー]+$/.test(wrongText)) {
+    return new RegExp(`(?<![ぁ-んー])${escaped}(?![ぁ-んー])`, "g");
+  }
+
+  if (/^[一-龠々]+$/.test(wrongText)) {
+    return new RegExp(`(?<![一-龠々])${escaped}(?![一-龠々])`, "g");
+  }
+
+  return new RegExp(escaped, "g");
+}
+
+function applySafeReplace(input: string, wrongText: string, correctText: string) {
+  if (!input) {
+    return input;
+  }
+  return input.replace(buildSafeCorrectionRegex(wrongText), correctText);
+}
+
+function findContextAroundSelection(transcript: string, selectedText: string) {
+  const index = transcript.indexOf(selectedText);
+  if (index === -1) {
+    return "";
+  }
+  const start = Math.max(0, index - 50);
+  const end = Math.min(transcript.length, index + selectedText.length + 50);
+  return transcript.slice(start, end);
 }
 
 function getEventText(value: unknown): string {
@@ -110,14 +162,32 @@ export function LiveTranscriptionPanel({
   const [realtimeSessionId, setRealtimeSessionId] = useState("");
   const [transcriptText, setTranscriptText] = useState("");
   const [partialText, setPartialText] = useState("");
+  const [wrongText, setWrongText] = useState("");
+  const [correctText, setCorrectText] = useState("");
+  const [context, setContext] = useState("");
+  const [isPronunciationVariant, setIsPronunciationVariant] = useState(true);
+  const [createGlossaryTerm, setCreateGlossaryTerm] = useState(true);
+  const [isSavingCorrection, setIsSavingCorrection] = useState(false);
+  const [correctionError, setCorrectionError] = useState("");
+  const [correctionSuccess, setCorrectionSuccess] = useState("");
 
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const transcriptBoxRef = useRef<HTMLDivElement | null>(null);
   const meetingIdRef = useRef("");
   const realtimeSessionIdRef = useRef("");
   const transcriptRef = useRef("");
   const partialRef = useRef("");
+  const localCorrectionsRef = useRef<LocalCorrectionRule[]>([]);
+
+  function applyLocalCorrections(text: string) {
+    let result = text;
+    for (const rule of localCorrectionsRef.current) {
+      result = applySafeReplace(result, rule.wrongText, rule.correctText);
+    }
+    return result;
+  }
 
   function cleanupConnection() {
     dataChannelRef.current?.close();
@@ -133,7 +203,7 @@ export function LiveTranscriptionPanel({
   }
 
   function appendCommittedLine(text: string) {
-    const normalized = normalizeText(text);
+    const normalized = applyLocalCorrections(normalizeText(text));
     if (!normalized) {
       return;
     }
@@ -143,6 +213,101 @@ export function LiveTranscriptionPanel({
       : normalized;
     transcriptRef.current = nextTranscript;
     setTranscriptText(nextTranscript);
+  }
+
+  function pullSelectionForCorrection() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+
+    const anchorNode = selection.anchorNode;
+    if (!anchorNode || !transcriptBoxRef.current?.contains(anchorNode)) {
+      return;
+    }
+
+    const selectedText = normalizeText(selection.toString());
+    if (!selectedText) {
+      return;
+    }
+
+    setWrongText(selectedText);
+    const fullLiveTranscript = transcriptRef.current
+      ? `${transcriptRef.current}\n${partialRef.current}`
+      : partialRef.current;
+    setContext(findContextAroundSelection(fullLiveTranscript, selectedText));
+  }
+
+  async function handleSaveCorrection() {
+    if (isSavingCorrection) {
+      return;
+    }
+
+    const normalizedWrong = normalizeText(wrongText);
+    const normalizedCorrect = normalizeText(correctText);
+    const currentMeetingId = normalizeText(meetingIdRef.current || meetingId);
+
+    if (!currentMeetingId) {
+      setCorrectionError("先にライブ文字起こしを開始してください。");
+      return;
+    }
+    if (!normalizedWrong || !normalizedCorrect) {
+      setCorrectionError("誤認識語と正しい語を入力してください。");
+      return;
+    }
+
+    setIsSavingCorrection(true);
+    setCorrectionError("");
+    setCorrectionSuccess("");
+
+    try {
+      const response = await fetch("/api/corrections", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          meetingId: currentMeetingId,
+          organizationId,
+          wrongText: normalizedWrong,
+          correctText: normalizedCorrect,
+          context,
+          isPronunciationVariant,
+          applyGlobally: true,
+          createGlossaryTerm,
+          termData: {},
+        }),
+      });
+
+      const json = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(json.error || "訂正保存に失敗しました。");
+      }
+
+      localCorrectionsRef.current = [
+        ...localCorrectionsRef.current.filter((rule) => rule.wrongText !== normalizedWrong),
+        { wrongText: normalizedWrong, correctText: normalizedCorrect },
+      ];
+
+      transcriptRef.current = applySafeReplace(
+        transcriptRef.current,
+        normalizedWrong,
+        normalizedCorrect,
+      );
+      setTranscriptText(transcriptRef.current);
+      setPartialText(applyLocalCorrections(partialRef.current));
+
+      setCorrectionSuccess("保存して学習しました。以降の表示にも即反映します。");
+      setWrongText("");
+      setContext("");
+      setCorrectText(normalizedCorrect);
+    } catch (saveError) {
+      setCorrectionError(formatErrorMessage(saveError));
+    } finally {
+      setIsSavingCorrection(false);
+    }
   }
 
   function flushPartial() {
@@ -173,10 +338,15 @@ export function LiveTranscriptionPanel({
     partialRef.current = "";
     setTranscriptText("");
     setPartialText("");
+    setWrongText("");
+    setContext("");
+    setCorrectionError("");
+    setCorrectionSuccess("");
     meetingIdRef.current = "";
     realtimeSessionIdRef.current = "";
     setMeetingId("");
     setRealtimeSessionId("");
+    localCorrectionsRef.current = [];
 
     try {
       const tokenResponse = await fetch("/api/realtime/token", {
@@ -234,7 +404,7 @@ export function LiveTranscriptionPanel({
           const delta = getEventDelta(payload);
           if (delta) {
             partialRef.current += delta;
-            setPartialText(partialRef.current);
+            setPartialText(applyLocalCorrections(partialRef.current));
           }
 
           const text = getEventText(payload);
@@ -415,10 +585,90 @@ export function LiveTranscriptionPanel({
           {meetingId ? ` / meeting_id: ${meetingId}` : ""}
         </p>
         <div className="min-h-48 whitespace-pre-wrap rounded-md border bg-muted/20 p-3 text-sm">
-          {transcriptText ? transcriptText : "ここにリアルタイム文字起こしが表示されます。"}
-          {partialText ? <span className="opacity-70">{transcriptText ? `\n${partialText}` : partialText}</span> : null}
+          <div
+            ref={transcriptBoxRef}
+            onMouseUp={pullSelectionForCorrection}
+            className="min-h-40 whitespace-pre-wrap"
+          >
+            {transcriptText ? transcriptText : "ここにリアルタイム文字起こしが表示されます。"}
+            {partialText ? <span className="opacity-70">{transcriptText ? `\n${partialText}` : partialText}</span> : null}
+          </div>
         </div>
       </div>
+
+      <section className="space-y-3 rounded-md border bg-muted/10 p-3">
+        <div>
+          <p className="text-sm font-medium">ライブ中にその場で訂正</p>
+          <p className="text-xs text-muted-foreground">
+            文字起こし本文を選択して「選択を取り込む」を押すと、後からではなく今すぐ学習できます。
+          </p>
+        </div>
+
+        {correctionError ? (
+          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            {correctionError}
+          </p>
+        ) : null}
+        {correctionSuccess ? (
+          <p className="rounded-md border border-emerald-300/50 bg-emerald-50 px-2 py-1 text-xs text-emerald-700">
+            {correctionSuccess}
+          </p>
+        ) : null}
+
+        <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+          <input
+            value={wrongText}
+            onChange={(event) => setWrongText(event.target.value)}
+            placeholder="誤認識語"
+            className="rounded-md border bg-background px-3 py-2 text-sm"
+          />
+          <input
+            value={correctText}
+            onChange={(event) => setCorrectText(event.target.value)}
+            placeholder="正しい語"
+            className="rounded-md border bg-background px-3 py-2 text-sm"
+          />
+          <Button type="button" variant="outline" onClick={pullSelectionForCorrection}>
+            選択を取り込む
+          </Button>
+        </div>
+
+        <textarea
+          value={context}
+          onChange={(event) => setContext(event.target.value)}
+          rows={2}
+          placeholder="文脈"
+          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+        />
+
+        <div className="space-y-1 text-xs">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={isPronunciationVariant}
+              onChange={(event) => setIsPronunciationVariant(event.target.checked)}
+            />
+            これは発音違いです
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={createGlossaryTerm}
+              onChange={(event) => setCreateGlossaryTerm(event.target.checked)}
+            />
+            用語辞書にも反映する
+          </label>
+        </div>
+
+        <Button
+          type="button"
+          variant="outline"
+          disabled={isSavingCorrection}
+          onClick={handleSaveCorrection}
+        >
+          {isSavingCorrection ? "保存中..." : "この訂正を保存"}
+        </Button>
+      </section>
     </div>
   );
 }
