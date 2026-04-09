@@ -4,6 +4,8 @@ import { notFound, redirect } from "next/navigation";
 import { MinutesRenderer } from "@/components/MinutesRenderer";
 import { PageShell } from "@/components/app/page-shell";
 import { CommentSidebar } from "@/components/comments/CommentSidebar";
+import { MeetingProcessingIndicator } from "@/components/meeting/MeetingProcessingIndicator";
+import { ServerActionSubmitButton } from "@/components/meeting/ServerActionSubmitButton";
 import { UncertainTermReviewCard } from "@/components/meeting/UncertainTermReviewCard";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -399,6 +401,7 @@ export default async function MeetingDetailPage({
         <p>
           ステータス: <span className="font-medium">{statusLabel(meeting.status)}</span>
         </p>
+        <MeetingProcessingIndicator status={meeting.status} />
         <p>LLM: {meeting.llm_used ?? "未指定"}</p>
         <p>開催日時: {meeting.meeting_date ? new Date(meeting.meeting_date).toLocaleString("ja-JP") : "-"}</p>
         <p>作成日時: {new Date(meeting.created_at).toLocaleString("ja-JP")}</p>
@@ -417,9 +420,11 @@ export default async function MeetingDetailPage({
                   <option value="detailed">詳細モード（より細かく記述）</option>
                 </select>
               </div>
-              <Button type="submit" disabled={meeting.status === "transcribing" || meeting.status === "generating"}>
-                文字起こしを開始
-              </Button>
+              <ServerActionSubmitButton
+                idleLabel="文字起こしを開始"
+                pendingLabel="AI起動中..."
+                disabled={meeting.status === "transcribing" || meeting.status === "generating"}
+              />
             </form>
           ) : null}
 
@@ -435,13 +440,12 @@ export default async function MeetingDetailPage({
                   <option value="detailed">詳細モード（より細かく記述）</option>
                 </select>
               </div>
-              <Button
-                type="submit"
+              <ServerActionSubmitButton
+                idleLabel="議事録を再生成"
+                pendingLabel="AI再生成中..."
                 variant="outline"
                 disabled={meeting.status === "transcribing" || meeting.status === "generating"}
-              >
-                議事録を再生成
-              </Button>
+              />
             </form>
           ) : null}
         </div>
