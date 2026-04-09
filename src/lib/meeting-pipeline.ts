@@ -131,6 +131,14 @@ function getAnthropicClient() {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 }
 
+function hasOpenAiKey() {
+  return Boolean(process.env.OPENAI_API_KEY);
+}
+
+function hasAnthropicKey() {
+  return Boolean(process.env.ANTHROPIC_API_KEY);
+}
+
 function formatMiB(bytes: number) {
   return (bytes / (1024 * 1024)).toFixed(1);
 }
@@ -716,6 +724,26 @@ function getPreferredLlm(value: string | null | undefined) {
   return "claude-sonnet-4-6" as const;
 }
 
+function resolveAvailableLlm(preferred: "claude-sonnet-4-6" | "gpt-4o") {
+  if (preferred === "claude-sonnet-4-6") {
+    if (hasAnthropicKey()) {
+      return "claude-sonnet-4-6" as const;
+    }
+    if (hasOpenAiKey()) {
+      return "gpt-4o" as const;
+    }
+    throw new Error("ANTHROPIC_API_KEY と OPENAI_API_KEY の両方が未設定です。");
+  }
+
+  if (hasOpenAiKey()) {
+    return "gpt-4o" as const;
+  }
+  if (hasAnthropicKey()) {
+    return "claude-sonnet-4-6" as const;
+  }
+  throw new Error("OPENAI_API_KEY と ANTHROPIC_API_KEY の両方が未設定です。");
+}
+
 export async function transcribeMeeting(meetingId: string) {
   const admin = createAdminClient();
   const openai = getOpenAiClient();
@@ -878,7 +906,7 @@ export async function generateMinutesForMeeting(
     })
     .join("\n");
 
-  const llm = getPreferredLlm(meeting.llm_used ?? organization?.default_llm);
+  const llm = resolveAvailableLlm(getPreferredLlm(meeting.llm_used ?? organization?.default_llm));
   const systemPrompt = buildSystemPrompt(glossaryText);
   const userPrompt = `【文字起こし】\n${meeting.corrected_transcript}`;
 
