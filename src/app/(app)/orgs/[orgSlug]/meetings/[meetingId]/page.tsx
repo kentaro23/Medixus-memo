@@ -196,17 +196,18 @@ async function startTranscriptionAction(orgSlug: string, meetingId: string, form
 
   try {
     await transcribeMeeting(meetingId, { detailMode });
-    redirectWithMessage(
-      orgSlug,
-      meetingId,
-      "success",
-      detailMode === "detailed"
-        ? "文字起こしと議事録生成（詳細モード）が完了しました。"
-        : "文字起こしと議事録生成が完了しました。",
-    );
   } catch (error) {
     redirectWithMessage(orgSlug, meetingId, "error", formatTranscriptionError(error));
   }
+
+  redirectWithMessage(
+    orgSlug,
+    meetingId,
+    "success",
+    detailMode === "detailed"
+      ? "文字起こしと議事録生成（詳細モード）が完了しました。"
+      : "文字起こしと議事録生成が完了しました。",
+  );
 }
 
 async function regenerateMinutesAction(orgSlug: string, meetingId: string, formData: FormData) {
@@ -228,18 +229,19 @@ async function regenerateMinutesAction(orgSlug: string, meetingId: string, formD
 
   try {
     await generateMinutesForMeeting(meetingId, { detailMode });
-    redirectWithMessage(
-      orgSlug,
-      meetingId,
-      "success",
-      detailMode === "detailed"
-        ? "議事録を詳細モードで再生成しました。"
-        : "議事録を再生成しました。",
-    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     redirectWithMessage(orgSlug, meetingId, "error", `議事録再生成に失敗しました: ${message}`);
   }
+
+  redirectWithMessage(
+    orgSlug,
+    meetingId,
+    "success",
+    detailMode === "detailed"
+      ? "議事録を詳細モードで再生成しました。"
+      : "議事録を再生成しました。",
+  );
 }
 
 async function addCandidateToGlossaryAction(orgSlug: string, meetingId: string, formData: FormData) {
