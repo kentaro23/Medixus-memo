@@ -107,6 +107,8 @@ export function LiveTranscriptionPanel({
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const meetingIdRef = useRef("");
+  const realtimeSessionIdRef = useRef("");
   const transcriptRef = useRef("");
   const partialRef = useRef("");
 
@@ -164,6 +166,10 @@ export function LiveTranscriptionPanel({
     partialRef.current = "";
     setTranscriptText("");
     setPartialText("");
+    meetingIdRef.current = "";
+    realtimeSessionIdRef.current = "";
+    setMeetingId("");
+    setRealtimeSessionId("");
 
     try {
       const tokenResponse = await fetch("/api/realtime/token", {
@@ -260,6 +266,8 @@ export function LiveTranscriptionPanel({
         sdp: answerSdp,
       });
 
+      meetingIdRef.current = tokenJson.meetingId;
+      realtimeSessionIdRef.current = tokenJson.realtimeSessionId;
       setMeetingId(tokenJson.meetingId);
       setRealtimeSessionId(tokenJson.realtimeSessionId);
       setInfo("ライブ文字起こしを開始しました。");
@@ -286,9 +294,22 @@ export function LiveTranscriptionPanel({
       cleanupConnection();
       setIsLive(false);
 
-      const finalTranscript = normalizeText(transcriptRef.current);
-      if (!meetingId || !realtimeSessionId || !finalTranscript) {
-        throw new Error("終了処理に必要なデータが不足しています。");
+      const currentMeetingId = normalizeText(meetingIdRef.current || meetingId);
+      const currentRealtimeSessionId = normalizeText(
+        realtimeSessionIdRef.current || realtimeSessionId,
+      );
+      const finalTranscript = normalizeText(transcriptRef.current || partialRef.current);
+
+      if (!currentMeetingId || !currentRealtimeSessionId) {
+        throw new Error(
+          "セッションIDの取得に失敗しました。ページを再読み込みしてライブ文字起こしを再開始してください。",
+        );
+      }
+
+      if (!finalTranscript) {
+        throw new Error(
+          "まだ文字起こし結果がありません。数秒発話してから停止するか、再度開始してください。",
+        );
       }
 
       const completeResponse = await fetch("/api/realtime/complete", {
@@ -297,9 +318,9 @@ export function LiveTranscriptionPanel({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          meetingId,
+          meetingId: currentMeetingId,
           organizationId,
-          realtimeSessionId,
+          realtimeSessionId: currentRealtimeSessionId,
           transcript: finalTranscript,
         }),
       });
@@ -313,7 +334,7 @@ export function LiveTranscriptionPanel({
       }
 
       router.push(
-        `/orgs/${orgSlug}/meetings/${meetingId}?success=${encodeURIComponent(
+        `/orgs/${orgSlug}/meetings/${currentMeetingId}?success=${encodeURIComponent(
           "ライブ文字起こしを終了し、議事録を生成しました。",
         )}`,
       );
