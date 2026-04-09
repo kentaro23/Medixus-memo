@@ -64,9 +64,12 @@ export default async function OrganizationDashboardPage({
         </p>
       ) : null}
 
-      <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
         <Link href={`/orgs/${orgSlug}/meetings/new`} className="rounded-md border p-3 hover:bg-muted">
           新規議事録を作成
+        </Link>
+        <Link href={`/orgs/${orgSlug}/meetings/live`} className="rounded-md border p-3 hover:bg-muted">
+          ライブ文字起こし
         </Link>
         <Link href={`/orgs/${orgSlug}/glossary`} className="rounded-md border p-3 hover:bg-muted">
           用語辞書を管理

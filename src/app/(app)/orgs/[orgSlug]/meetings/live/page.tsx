@@ -1,6 +1,11 @@
 import { PageShell } from "@/components/app/page-shell";
+import { LiveTranscriptionPanel } from "@/components/meeting/LiveTranscriptionPanel";
+import { requireOrganizationContext } from "@/lib/org-context";
 
 type Params = { orgSlug: string };
+type OrganizationLlmRow = {
+  default_llm: string;
+};
 
 export default async function LiveMeetingPage({
   params,
@@ -8,12 +13,33 @@ export default async function LiveMeetingPage({
   params: Promise<Params>;
 }) {
   const { orgSlug } = await Promise.resolve(params);
+  const nextPath = `/orgs/${orgSlug}/meetings/live`;
+
+  const { supabase, organization } = await requireOrganizationContext({
+    orgSlug,
+    nextPath,
+  });
+
+  const { data: orgSettings } = await supabase
+    .from("organizations")
+    .select("default_llm")
+    .eq("id", organization.id)
+    .maybeSingle<OrganizationLlmRow>();
+
+  const defaultLlm =
+    orgSettings?.default_llm === "gpt-4o" ? "gpt-4o" : "claude-sonnet-4-6";
 
   return (
     <PageShell
       title="リアルタイム文字起こし"
-      description="Phase 7 で OpenAI Realtime API の接続とライブ表示を実装します。"
+      description="マイク音声をリアルタイムで文字起こしし、終了時に議事録を自動生成します。"
       orgSlug={orgSlug}
-    />
+    >
+      <LiveTranscriptionPanel
+        orgSlug={orgSlug}
+        organizationId={organization.id}
+        defaultLlm={defaultLlm}
+      />
+    </PageShell>
   );
 }
