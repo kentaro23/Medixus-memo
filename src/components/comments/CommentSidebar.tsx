@@ -12,6 +12,14 @@ type Profile = {
   avatar_url: string | null;
 };
 
+type MemberOption = {
+  id: string;
+  email: string;
+  full_name: string | null;
+  avatar_url: string | null;
+  role: "owner" | "admin" | "member";
+};
+
 type CommentRow = {
   id: string;
   organization_id: string;
@@ -52,6 +60,34 @@ function toErrorMessage(error: unknown) {
   return "コメント処理に失敗しました。";
 }
 
+function extractMentionedUserIds({
+  body,
+  selectedIds,
+  members,
+}: {
+  body: string;
+  selectedIds: string[];
+  members: MemberOption[];
+}) {
+  const result = new Set(selectedIds);
+  const normalizedBody = body.toLowerCase();
+
+  for (const member of members) {
+    const emailHit = normalizedBody.includes(`@${member.email.toLowerCase()}`);
+    const name = member.full_name?.trim();
+    const nameHit = name ? normalizedBody.includes(`@${name.toLowerCase()}`) : false;
+    if (emailHit || nameHit) {
+      result.add(member.id);
+    }
+  }
+
+  return Array.from(result);
+}
+
+function mentionLabel(member: MemberOption) {
+  return member.full_name || member.email;
+}
+
 export function CommentSidebar({
   organizationId,
   meetingId,
@@ -69,6 +105,8 @@ export function CommentSidebar({
   const [selectedText, setSelectedText] = useState("");
   const [newCommentBody, setNewCommentBody] = useState("");
   const [replyBodies, setReplyBodies] = useState<Record<string, string>>({});
+  const [members, setMembers] = useState<MemberOption[]>([]);
+  const [mentionUserIds, setMentionUserIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   const availableBlocks = useMemo(() => {
@@ -119,16 +157,55 @@ export function CommentSidebar({
     };
   }, [fetchComments, meetingId, supabase]);
 
+  useEffect(() => {
+    let active = true;
+
+    async function fetchMembers() {
+      try {
+        const response = await fetch(
+          `/api/organizations/${encodeURIComponent(organizationId)}/members`,
+        );
+        const data = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          members?: MemberOption[];
+        };
+
+        if (!response.ok) {
+          throw new Error(data.error ?? "メンバー取得に失敗しました。");
+        }
+
+        if (!active) {
+          return;
+        }
+
+        setMembers(data.members ?? []);
+      } catch (memberError) {
+        if (!active) {
+          return;
+        }
+        setError(toErrorMessage(memberError));
+      }
+    }
+
+    void fetchMembers();
+
+    return () => {
+      active = false;
+    };
+  }, [organizationId]);
+
   async function createComment({
     body,
     parentCommentId,
     blockId,
     selectedTextValue,
+    mentionIds,
   }: {
     body: string;
     parentCommentId?: string | null;
     blockId?: string | null;
     selectedTextValue?: string;
+    mentionIds?: string[];
   }) {
     const normalizedBody = body.trim();
     if (!normalizedBody) {
@@ -139,6 +216,12 @@ export function CommentSidebar({
     setError("");
 
     try {
+      const extractedMentionedUserIds = extractMentionedUserIds({
+        body: normalizedBody,
+        selectedIds: mentionIds ?? mentionUserIds,
+        members,
+      });
+
       const response = await fetch("/api/comments", {
         method: "POST",
         headers: {
@@ -151,7 +234,7 @@ export function CommentSidebar({
           selectedText: selectedTextValue ?? selectedText,
           body: normalizedBody,
           parentCommentId: parentCommentId ?? null,
-          mentionedUserIds: [],
+          mentionedUserIds: extractedMentionedUserIds,
         }),
       });
 
@@ -163,6 +246,7 @@ export function CommentSidebar({
       if (!parentCommentId) {
         setNewCommentBody("");
         setSelectedText("");
+        setMentionUserIds([]);
       } else {
         setReplyBodies((prev) => ({
           ...prev,
@@ -272,6 +356,29 @@ export function CommentSidebar({
           className="w-full rounded-md border bg-background px-2 py-1 text-sm"
         />
 
+        <label htmlFor="mentions" className="text-xs font-medium">
+          @メンション（任意）
+        </label>
+        <select
+          id="mentions"
+          multiple
+          value={mentionUserIds}
+          onChange={(event) => {
+            const values = Array.from(event.target.selectedOptions).map((option) => option.value);
+            setMentionUserIds(values);
+          }}
+          className="min-h-24 w-full rounded-md border bg-background px-2 py-1 text-sm"
+        >
+          {members.map((member) => (
+            <option key={member.id} value={member.id}>
+              {mentionLabel(member)} ({member.role})
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-muted-foreground">
+          コメント内で `@メールアドレス` または `@表示名` を書いても自動でメンションされます。
+        </p>
+
         <Button
           type="button"
           variant="outline"
@@ -321,6 +428,21 @@ export function CommentSidebar({
                           </p>
                         ) : null}
                         <p className="whitespace-pre-wrap text-sm">{comment.body}</p>
+                        {comment.mentioned_user_ids && comment.mentioned_user_ids.length > 0 ? (
+                          <p className="text-xs text-muted-foreground">
+                            メンション:{" "}
+                            {comment.mentioned_user_ids
+                              .map((userId) => {
+                                const member = members.find((row) => row.id === userId);
+                                if (!member) {
+                                  return null;
+                                }
+                                return `@${mentionLabel(member)}`;
+                              })
+                              .filter((value): value is string => Boolean(value))
+                              .join(", ") || "-"}
+                          </p>
+                        ) : null}
 
                         <div className="flex flex-wrap gap-2">
                           <Button
@@ -372,6 +494,7 @@ export function CommentSidebar({
                                 body: replyBodies[comment.id] ?? "",
                                 parentCommentId: comment.id,
                                 blockId: comment.block_id,
+                                mentionIds: [],
                               })
                             }
                           >
