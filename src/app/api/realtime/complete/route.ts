@@ -47,26 +47,25 @@ function isAsciiToken(text: string) {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text);
 }
 
-function isRiskyShortToken(text: string) {
-  const value = text.trim();
-  if (!value) {
-    return true;
-  }
-
-  const length = [...value].length;
-  if (length <= 2) {
-    return true;
-  }
-
-  const isJapaneseToken = /^[一-龠ぁ-んァ-ヶー]+$/.test(value);
-  return isJapaneseToken && length <= 3;
-}
-
-function buildGlobalCorrectionRegex(wrongText: string) {
+function buildSafeCorrectionRegex(wrongText: string) {
   const escaped = escapeRegex(wrongText);
+
   if (isAsciiToken(wrongText)) {
     return new RegExp(`\\b${escaped}\\b`, "g");
   }
+
+  if (/^[ァ-ヶー]+$/.test(wrongText)) {
+    return new RegExp(`(?<![ァ-ヶー])${escaped}(?![ァ-ヶー])`, "g");
+  }
+
+  if (/^[ぁ-んー]+$/.test(wrongText)) {
+    return new RegExp(`(?<![ぁ-んー])${escaped}(?![ぁ-んー])`, "g");
+  }
+
+  if (/^[一-龠々]+$/.test(wrongText)) {
+    return new RegExp(`(?<![一-龠々])${escaped}(?![一-龠々])`, "g");
+  }
+
   return new RegExp(escaped, "g");
 }
 
@@ -78,25 +77,8 @@ function applyCorrections(transcript: string, corrections: CorrectionRow[]) {
       continue;
     }
 
-    if (correction.context_keywords && correction.context_keywords.length > 0) {
-      const escaped = escapeRegex(correction.wrong_text);
-      const regex = new RegExp(`(.{0,80})${escaped}(.{0,80})`, "g");
-
-      result = result.replace(regex, (match, before: string, after: string) => {
-        const surrounding = `${before}${after}`;
-        const hasContext = correction.context_keywords?.some((keyword) =>
-          surrounding.includes(keyword),
-        );
-        return hasContext ? `${before}${correction.correct_text}${after}` : match;
-      });
-      continue;
-    }
-
-    if (isRiskyShortToken(correction.wrong_text)) {
-      continue;
-    }
-
-    result = result.replace(buildGlobalCorrectionRegex(correction.wrong_text), correction.correct_text);
+    const regex = buildSafeCorrectionRegex(correction.wrong_text);
+    result = result.replace(regex, correction.correct_text);
   }
 
   return result;

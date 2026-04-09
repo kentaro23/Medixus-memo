@@ -36,6 +36,7 @@ type CorrectionInsertRow = {
 };
 
 type MeetingUpdateRow = {
+  id: string;
   corrected_transcript: string | null;
   minutes_markdown: string | null;
 };
@@ -49,60 +50,42 @@ function toNullable(value: unknown) {
   return normalized.length > 0 ? normalized : null;
 }
 
-function replaceFirstLiteral(input: string, wrongText: string, correctText: string) {
-  const index = input.indexOf(wrongText);
-  if (index === -1) {
-    return input;
-  }
-  return `${input.slice(0, index)}${correctText}${input.slice(index + wrongText.length)}`;
+function escapeRegex(input: string) {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function isRiskyShortToken(text: string) {
-  const value = text.trim();
-  if (!value) {
-    return true;
-  }
-
-  const length = [...value].length;
-  if (length <= 2) {
-    return true;
-  }
-
-  const isJapaneseToken = /^[一-龠ぁ-んァ-ヶー]+$/.test(value);
-  return isJapaneseToken && length <= 3;
+function isAsciiToken(text: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text);
 }
 
-function applyContextAwareSingleReplace(
-  input: string | null,
-  wrongText: string,
-  correctText: string,
-  context: string,
-) {
+function buildSafeCorrectionRegex(wrongText: string) {
+  const escaped = escapeRegex(wrongText);
+
+  if (isAsciiToken(wrongText)) {
+    return new RegExp(`\\b${escaped}\\b`, "g");
+  }
+
+  if (/^[ァ-ヶー]+$/.test(wrongText)) {
+    return new RegExp(`(?<![ァ-ヶー])${escaped}(?![ァ-ヶー])`, "g");
+  }
+
+  if (/^[ぁ-んー]+$/.test(wrongText)) {
+    return new RegExp(`(?<![ぁ-んー])${escaped}(?![ぁ-んー])`, "g");
+  }
+
+  if (/^[一-龠々]+$/.test(wrongText)) {
+    return new RegExp(`(?<![一-龠々])${escaped}(?![一-龠々])`, "g");
+  }
+
+  return new RegExp(escaped, "g");
+}
+
+function applySafeReplace(input: string | null, wrongText: string, correctText: string) {
   if (!input) {
     return input;
   }
 
-  const trimmedContext = context.trim();
-  if (trimmedContext && trimmedContext.includes(wrongText)) {
-    const replacedContext = replaceFirstLiteral(trimmedContext, wrongText, correctText);
-    if (replacedContext !== trimmedContext) {
-      const contextIndex = input.indexOf(trimmedContext);
-      if (contextIndex !== -1) {
-        return (
-          input.slice(0, contextIndex) +
-          replacedContext +
-          input.slice(contextIndex + trimmedContext.length)
-        );
-      }
-    }
-  }
-
-  // 短い語は誤爆しやすいため、文脈一致しない場合は自動置換しない。
-  if (isRiskyShortToken(wrongText)) {
-    return input;
-  }
-
-  return replaceFirstLiteral(input, wrongText, correctText);
+  return input.replace(buildSafeCorrectionRegex(wrongText), correctText);
 }
 
 function mergeUnique(values: string[], nextValue: string) {
@@ -273,30 +256,47 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const { data: meeting } = await supabase
+  const { data: meetings } = await supabase
     .from("meetings")
-    .select("corrected_transcript, minutes_markdown")
-    .eq("id", meetingId)
-    .maybeSingle<MeetingUpdateRow>();
+    .select("id, corrected_transcript, minutes_markdown")
+    .eq("organization_id", organizationId);
 
-  if (meeting) {
-    await supabase
+  let updatedMeetings = 0;
+
+  for (const meeting of (meetings ?? []) as MeetingUpdateRow[]) {
+    if (!applyGlobally && meeting.id !== meetingId) {
+      continue;
+    }
+
+    const nextCorrectedTranscript = applySafeReplace(
+      meeting.corrected_transcript,
+      wrongText,
+      correctText,
+    );
+    const nextMinutesMarkdown = applySafeReplace(
+      meeting.minutes_markdown,
+      wrongText,
+      correctText,
+    );
+
+    if (
+      nextCorrectedTranscript === meeting.corrected_transcript &&
+      nextMinutesMarkdown === meeting.minutes_markdown
+    ) {
+      continue;
+    }
+
+    const { error: updateMeetingError } = await supabase
       .from("meetings")
       .update({
-        corrected_transcript: applyContextAwareSingleReplace(
-          meeting.corrected_transcript,
-          wrongText,
-          correctText,
-          context,
-        ),
-        minutes_markdown: applyContextAwareSingleReplace(
-          meeting.minutes_markdown,
-          wrongText,
-          correctText,
-          context,
-        ),
+        corrected_transcript: nextCorrectedTranscript,
+        minutes_markdown: nextMinutesMarkdown,
       })
-      .eq("id", meetingId);
+      .eq("id", meeting.id);
+
+    if (!updateMeetingError) {
+      updatedMeetings += 1;
+    }
   }
 
   return NextResponse.json({
@@ -304,5 +304,6 @@ export async function POST(request: NextRequest) {
     correctionId: correction.id,
     glossaryTermId,
     contextKeywords,
+    updatedMeetings,
   });
 }
