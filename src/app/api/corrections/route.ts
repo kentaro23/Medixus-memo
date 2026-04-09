@@ -89,6 +89,41 @@ function applySafeReplace(input: string | null, wrongText: string, correctText: 
   return input.replace(buildSafeCorrectionRegex(wrongText), correctText);
 }
 
+function cleanupResolvedUncertaintyArtifacts(
+  input: string | null,
+  wrongText: string,
+  correctText: string,
+) {
+  if (!input) {
+    return input;
+  }
+
+  const wrong = escapeRegex(wrongText);
+  const correct = escapeRegex(correctText);
+
+  let output = input;
+
+  // 例: "B6J、B6Jと聞こえる" -> "B6J"
+  output = output.replace(
+    new RegExp(`(${correct}|${wrong})[、,]\\s*(${correct}|${wrong})\\s*と聞こえる`, "g"),
+    correctText,
+  );
+
+  // 例: "B6Jと聞こえる系統" / "「B6J」と聞こえる" -> "B6J系統" / "B6J"
+  output = output.replace(
+    new RegExp(`「?(${correct}|${wrong})」?\\s*と聞こえる`, "g"),
+    correctText,
+  );
+
+  // 例: "B6J（と聞こえる）" -> "B6J"
+  output = output.replace(
+    new RegExp(`(${correct}|${wrong})\\s*（\\s*と聞こえる\\s*）`, "g"),
+    correctText,
+  );
+
+  return output;
+}
+
 function removeResolvedCandidate(rawCandidates: unknown, wrongText: string, correctText: string) {
   if (!Array.isArray(rawCandidates)) {
     return rawCandidates;
@@ -309,6 +344,11 @@ export async function POST(request: NextRequest) {
       wrongText,
       correctText,
     );
+    const normalizedMinutesMarkdown = cleanupResolvedUncertaintyArtifacts(
+      nextMinutesMarkdown,
+      wrongText,
+      correctText,
+    );
     const nextCandidates =
       meeting.id === meetingId
         ? removeResolvedCandidate(meeting.new_term_candidates, wrongText, correctText)
@@ -316,7 +356,7 @@ export async function POST(request: NextRequest) {
 
     if (
       nextCorrectedTranscript === meeting.corrected_transcript &&
-      nextMinutesMarkdown === meeting.minutes_markdown &&
+      normalizedMinutesMarkdown === meeting.minutes_markdown &&
       nextCandidates === meeting.new_term_candidates
     ) {
       continue;
@@ -326,7 +366,7 @@ export async function POST(request: NextRequest) {
       .from("meetings")
       .update({
         corrected_transcript: nextCorrectedTranscript,
-        minutes_markdown: nextMinutesMarkdown,
+        minutes_markdown: normalizedMinutesMarkdown,
         new_term_candidates: nextCandidates,
       })
       .eq("id", meeting.id);
