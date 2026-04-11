@@ -21,6 +21,15 @@ function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function getEventType(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+
+  const event = value as { type?: unknown };
+  return normalizeText(event.type);
+}
+
 function formatErrorMessage(error: unknown) {
   if (error && typeof error === "object" && "message" in error) {
     const message = (error as { message?: unknown }).message;
@@ -97,10 +106,11 @@ function getEventText(value: unknown): string {
     };
   };
 
-  const type = normalizeText(event.type);
+  const type = getEventType(event);
 
   if (
     type === "conversation.item.input_audio_transcription.completed" ||
+    type === "conversation.item.input_audio_transcription.final" ||
     type === "response.output_text.done" ||
     type === "response.output_audio_transcript.done" ||
     type === "transcript.text.done"
@@ -124,17 +134,19 @@ function getEventDelta(value: unknown): string {
   const event = value as {
     type?: unknown;
     delta?: unknown;
+    transcript?: unknown;
   };
 
-  const type = normalizeText(event.type);
+  const type = getEventType(event);
 
   if (
     type === "conversation.item.input_audio_transcription.delta" ||
+    type === "conversation.item.input_audio_transcription.partial" ||
     type === "response.output_text.delta" ||
     type === "response.output_audio_transcript.delta" ||
     type === "transcript.text.delta"
   ) {
-    return normalizeText(event.delta);
+    return normalizeText(event.delta) || normalizeText(event.transcript);
   }
 
   return "";
@@ -370,7 +382,12 @@ export function LiveTranscriptionPanel({
       }
 
       const localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: {
+          channelCount: 1,
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+        },
       });
       streamRef.current = localStream;
 
@@ -383,15 +400,20 @@ export function LiveTranscriptionPanel({
 
       const dataChannel = peer.createDataChannel("oai-events");
       dataChannelRef.current = dataChannel;
+      dataChannel.onopen = () => {
+        setInfo("接続完了。話し始めると文字起こしがリアルタイムで表示されます。");
+      };
 
       dataChannel.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data) as unknown;
+          const eventType = getEventType(payload);
+
           if (
             payload &&
             typeof payload === "object" &&
             "type" in payload &&
-            normalizeText((payload as { type?: unknown }).type) === "error"
+            eventType === "error"
           ) {
             const errorMessage = normalizeText(
               (payload as { error?: { message?: unknown } }).error?.message,
@@ -401,10 +423,17 @@ export function LiveTranscriptionPanel({
             }
           }
 
+          if (eventType === "input_audio_buffer.speech_started") {
+            setInfo("音声を検出しました。文字起こし中...");
+          } else if (eventType === "input_audio_buffer.speech_stopped") {
+            setInfo("音声区間を処理中...");
+          }
+
           const delta = getEventDelta(payload);
           if (delta) {
             partialRef.current += delta;
             setPartialText(applyLocalCorrections(partialRef.current));
+            setInfo("文字起こしを更新中...");
           }
 
           const text = getEventText(payload);
@@ -412,6 +441,7 @@ export function LiveTranscriptionPanel({
             appendCommittedLine(text);
             partialRef.current = "";
             setPartialText("");
+            setInfo("最新の文字起こしを受信しました。");
           }
         } catch {
           // Ignore non-JSON events.
