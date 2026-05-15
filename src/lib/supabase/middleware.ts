@@ -29,7 +29,12 @@ export async function updateSession(request: NextRequest) {
     },
   });
 
-  await supabase.auth.getUser();
+  try {
+    await supabase.auth.getUser();
+  } catch (error) {
+    console.error("[middleware] failed to refresh Supabase session:", error);
+    return NextResponse.next({ request });
+  }
 
   return response;
 }

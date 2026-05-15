@@ -75,14 +75,25 @@ export async function signInAction(formData: FormData) {
     redirectWithMessage("/login", "error", "パスワードを入力してください。");
   }
 
-  const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+  let signInErrorMessage = "";
+  try {
+    const supabase = await createClient();
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
 
-  if (error) {
-    redirectWithMessage("/login", "error", toFriendlyAuthError(error.message));
+    if (error) {
+      signInErrorMessage = toFriendlyAuthError(error.message);
+    }
+  } catch (error) {
+    console.error("[auth] signInWithPassword failed:", error);
+    signInErrorMessage =
+      "ログイン処理で通信エラーが発生しました。30秒ほど待って再試行してください。";
+  }
+
+  if (signInErrorMessage) {
+    redirectWithMessage("/login", "error", signInErrorMessage);
   }
 
   redirect(nextPath);
@@ -107,21 +118,37 @@ export async function signUpAction(formData: FormData) {
     redirectWithMessage("/signup", "error", "確認用パスワードが一致しません。");
   }
 
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      emailRedirectTo: toEmailRedirectUrl(nextPath),
-      data: fullName ? { full_name: fullName } : undefined,
-    },
-  });
+  let signUpResult:
+    | {
+        session: unknown;
+      }
+    | null = null;
+  try {
+    const supabase = await createClient();
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: toEmailRedirectUrl(nextPath),
+        data: fullName ? { full_name: fullName } : undefined,
+      },
+    });
 
-  if (error) {
-    redirectWithMessage("/signup", "error", toFriendlyAuthError(error.message));
+    if (error) {
+      redirectWithMessage("/signup", "error", toFriendlyAuthError(error.message));
+    }
+
+    signUpResult = { session: data.session };
+  } catch (error) {
+    console.error("[auth] signUp failed:", error);
+    redirectWithMessage(
+      "/signup",
+      "error",
+      "登録処理で通信エラーが発生しました。30秒ほど待って再試行してください。",
+    );
   }
 
-  if (!data.session) {
+  if (!signUpResult?.session) {
     redirectWithMessage(
       "/login",
       "message",
