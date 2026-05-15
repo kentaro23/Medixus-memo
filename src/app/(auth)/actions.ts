@@ -62,6 +62,21 @@ function toFriendlyAuthError(message: string) {
   return message;
 }
 
+function toFriendlyNetworkError(error: unknown) {
+  const message =
+    error instanceof Error ? `${error.message} ${(error as { cause?: unknown }).cause ?? ""}` : "";
+
+  if (message.includes("ENOTFOUND")) {
+    return "Supabase接続先が見つかりません。環境変数 NEXT_PUBLIC_SUPABASE_URL を確認してください。";
+  }
+
+  if (message.includes("fetch failed")) {
+    return "Supabaseへの接続に失敗しました。環境変数設定とネットワーク状態を確認してください。";
+  }
+
+  return "ログイン処理で通信エラーが発生しました。30秒ほど待って再試行してください。";
+}
+
 export async function signInAction(formData: FormData) {
   const email = normalizeEmail(formData.get("email"));
   const password = normalizeOptionalText(formData.get("password"));
@@ -88,8 +103,7 @@ export async function signInAction(formData: FormData) {
     }
   } catch (error) {
     console.error("[auth] signInWithPassword failed:", error);
-    signInErrorMessage =
-      "ログイン処理で通信エラーが発生しました。30秒ほど待って再試行してください。";
+    signInErrorMessage = toFriendlyNetworkError(error);
   }
 
   if (signInErrorMessage) {
@@ -141,11 +155,7 @@ export async function signUpAction(formData: FormData) {
     signUpResult = { session: data.session };
   } catch (error) {
     console.error("[auth] signUp failed:", error);
-    redirectWithMessage(
-      "/signup",
-      "error",
-      "登録処理で通信エラーが発生しました。30秒ほど待って再試行してください。",
-    );
+    redirectWithMessage("/signup", "error", toFriendlyNetworkError(error));
   }
 
   if (!signUpResult?.session) {
